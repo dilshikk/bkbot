@@ -1,6 +1,6 @@
-﻿from datetime import datetime
+from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models import Link
@@ -16,6 +16,9 @@ class LinkService:
         1. is_active=True + is_healthy=True → по приоритету (desc)
         2. is_fallback=True + is_healthy=True → резервная
         3. None → бот скажет "зеркало обновляется"
+
+        FIX: убрано накопление click_count отсюда — нарушало CQS.
+        Инкремент вызывается явно через increment_click() после отправки.
         """
         result = await self._s.execute(
             select(Link)
@@ -43,11 +46,18 @@ class LinkService:
             )
             link = result.scalar_one_or_none()
 
-        if link is not None:
-            link.click_count += 1
-            await self._s.flush()
-
         return link
+
+    async def increment_click(self, link_id: int) -> None:
+        """
+        Атомарно инкрементирует счётчик переходов.
+        Используем UPDATE вместо read-modify-write чтобы избежать race condition.
+        """
+        await self._s.execute(
+            update(Link)
+            .where(Link.id == link_id)
+            .values(click_count=Link.click_count + 1)
+        )
 
     async def get_all_mirrors(self) -> list[Link]:
         """Все активные зеркала — для показа списка пользователю."""
