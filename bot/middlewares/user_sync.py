@@ -9,8 +9,15 @@ from aiogram.types import TelegramObject, Update, User as TgUser
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.core.redis_client import get_redis
 from bot.database.models import User
 from bot.core.config import settings
+
+
+# Обновляем last_seen_at не чаще чем раз в 5 минут.
+# Без этого — UPDATE в БД на каждый апдейт = лишний round-trip к PostgreSQL.
+_LAST_SEEN_TTL = 300  # секунд
+_LAST_SEEN_KEY = "last_seen:{user_id}"
 
 
 def _utcnow() -> datetime:
@@ -22,6 +29,9 @@ class UserSyncMiddleware(BaseMiddleware):
     """
     Автоматически создаёт или обновляет пользователя при каждом апдейте.
     Кладёт объект User в data["db_user"] для хендлеров.
+
+    PERF: last_seen_at обновляется через Redis-throttle (раз в 5 мин),
+    чтобы не делать лишний DB-flush на каждый апдейт.
     """
 
     async def __call__(
@@ -47,7 +57,6 @@ class UserSyncMiddleware(BaseMiddleware):
 
     @staticmethod
     def _extract_from_user(event: TelegramObject) -> TgUser | None:
-        # FIX: добавлена аннотация возвращаемого типа (было untyped)
         if isinstance(event, Update):
             if event.message:
                 return event.message.from_user
@@ -66,7 +75,6 @@ class UserSyncMiddleware(BaseMiddleware):
             select(User).where(User.telegram_id == from_user.id)
         )
         user = result.scalar_one_or_none()
-        # FIX: заменён deprecated datetime.utcnow()
         now = _utcnow()
         is_new = user is None
 
@@ -83,6 +91,7 @@ class UserSyncMiddleware(BaseMiddleware):
             session.add(user)
             await session.flush()
         else:
+            # Обновляем профильные поля если изменились
             changed = False
             for field, value in {
                 "username":   from_user.username,
@@ -93,11 +102,29 @@ class UserSyncMiddleware(BaseMiddleware):
                     setattr(user, field, value)
                     changed = True
 
-            user.last_seen_at = now
-            if changed:
+            # PERF: last_seen_at обновляем только раз в _LAST_SEEN_TTL секунд.
+            # Redis-ключ служит флагом "уже обновляли недавно".
+            # Без этого — UPDATE запрос на каждый апдейт замедляет цепочку.
+            should_update_seen = await _should_update_last_seen(from_user.id)
+            if should_update_seen or changed:
+                user.last_seen_at = now
                 await session.flush()
 
         return user, is_new
+
+
+async def _should_update_last_seen(telegram_id: int) -> bool:
+    """
+    Возвращает True (и устанавливает TTL-ключ) если прошло достаточно времени
+    с прошлого обновления last_seen_at.
+    """
+    redis = await get_redis()
+    key = _LAST_SEEN_KEY.format(user_id=telegram_id)
+    # SET key 1 EX ttl NX — атомарно: ставим только если не существует
+    result = await redis.set(key, "1", ex=_LAST_SEEN_TTL, nx=True)
+    # result == True  → ключа не было → обновляем
+    # result == None  → ключ есть     → пропускаем
+    return result is True
 
 
 async def _notify_admins_new_user(bot: Bot, user: User) -> None:
