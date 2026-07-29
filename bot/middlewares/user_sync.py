@@ -1,15 +1,21 @@
-﻿# bot/middlewares/user_sync.py
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot
-from aiogram.types import TelegramObject, Update
+from aiogram.types import TelegramObject, Update, User as TgUser
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models import User
 from bot.core.config import settings
+
+
+def _utcnow() -> datetime:
+    """Текущее UTC время без tzinfo (naive) для совместимости с БД."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class UserSyncMiddleware(BaseMiddleware):
@@ -29,7 +35,7 @@ class UserSyncMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         session: AsyncSession = data["session"]
-        bot: Bot              = data["bot"]
+        bot: Bot = data["bot"]
 
         db_user, is_new = await self._get_or_create(session, from_user)
         data["db_user"] = db_user
@@ -40,7 +46,8 @@ class UserSyncMiddleware(BaseMiddleware):
         return await handler(event, data)
 
     @staticmethod
-    def _extract_from_user(event: TelegramObject):
+    def _extract_from_user(event: TelegramObject) -> TgUser | None:
+        # FIX: добавлена аннотация возвращаемого типа (было untyped)
         if isinstance(event, Update):
             if event.message:
                 return event.message.from_user
@@ -51,12 +58,16 @@ class UserSyncMiddleware(BaseMiddleware):
         return getattr(event, "from_user", None)
 
     @staticmethod
-    async def _get_or_create(session: AsyncSession, from_user) -> tuple[User, bool]:
+    async def _get_or_create(
+        session: AsyncSession,
+        from_user: TgUser,
+    ) -> tuple[User, bool]:
         result = await session.execute(
             select(User).where(User.telegram_id == from_user.id)
         )
-        user   = result.scalar_one_or_none()
-        now    = datetime.utcnow()
+        user = result.scalar_one_or_none()
+        # FIX: заменён deprecated datetime.utcnow()
+        now = _utcnow()
         is_new = user is None
 
         if is_new:
@@ -90,9 +101,9 @@ class UserSyncMiddleware(BaseMiddleware):
 
 
 async def _notify_admins_new_user(bot: Bot, user: User) -> None:
-    name  = " ".join(filter(None, [user.first_name, user.last_name])) or "—"
+    name = " ".join(filter(None, [user.first_name, user.last_name])) or "—"
     uname = f"@{user.username}" if user.username else "нет username"
-    text  = (
+    text = (
         f"👤 <b>Новый пользователь!</b>\n"
         f"{'━' * 22}\n"
         f"Имя: {name}\n"
