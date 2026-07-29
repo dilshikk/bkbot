@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import logging
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -33,13 +33,28 @@ async def main() -> None:
     )
     dp = Dispatcher()
 
-    # ── Middlewares ──────────────────────────────────────────
+    # ── Middlewares (порядок важен) ──────────────────────────
+    #
+    # dp.update.outer_middleware → применяется ко ВСЕМ типам апдейтов
+    # dp.message.outer_middleware → только к Message
+    #
+    # DbSessionMiddleware и UserSyncMiddleware нужны всегда — на dp.update.
+    # PrivateOnlyMiddleware, BanCheck, Throttle — только для Message.
+    # SubscriptionGuardMiddleware — для Message И CallbackQuery → dp.update.
+    #
+    # ВАЖНО: SubscriptionGuardMiddleware был на dp.message → callback_query
+    # полностью обходил проверку подписки. Перенесён на dp.update.
+
     dp.update.outer_middleware(DbSessionMiddleware())
     dp.update.outer_middleware(UserSyncMiddleware())
+
     dp.message.outer_middleware(PrivateOnlyMiddleware(cooldown=300))
     dp.message.outer_middleware(BanCheckMiddleware())
     dp.message.outer_middleware(ThrottleMiddleware())
-    dp.message.outer_middleware(SubscriptionGuardMiddleware())
+
+    # SubscriptionGuard — после Throttle (чтобы спаммеры до него не доходили),
+    # но на уровне update чтобы ловить и callback_query
+    dp.update.outer_middleware(SubscriptionGuardMiddleware())
 
     # ── Routers ──────────────────────────────────────────────
     dp.include_router(admin_router)
