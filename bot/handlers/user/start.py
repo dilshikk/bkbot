@@ -1,6 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+import asyncio
+import logging
 
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery, InaccessibleMessage
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +17,7 @@ from bot.services.settings_service import get_settings
 from bot.services.subscription_service import check_all_subscriptions
 
 router = Router(name="user.start")
+logger = logging.getLogger(__name__)
 
 
 # ── /start ────────────────────────────────────────────────────
@@ -23,19 +28,16 @@ async def cmd_start(
     session: AsyncSession,
     db_user: User,
 ) -> None:
-    # FIX: message.text может быть None (пересланное сообщение без текста)
     raw_text = message.text or ""
     parts = raw_text.split(maxsplit=1)
     payload = parts[1].strip() if len(parts) > 1 else "direct"
 
-    # FIX: message.from_user может быть None (channel posts)
     if message.from_user is None:
         return
 
     user_repo = UserRepository(session)
     log_repo = LogRepository(session)
 
-    # Сохраняем источник трафика только первый раз
     await user_repo.set_source(db_user.id, payload)
     await log_repo.log(
         ActionType.START,
@@ -44,8 +46,6 @@ async def cmd_start(
         meta={"source": payload},
     )
 
-    # FIX: get_settings вызывался дважды (здесь и в _handle_subscription_check).
-    # Загружаем один раз и передаём дальше.
     bot_settings = await get_settings(session)
 
     if bot_settings.maintenance:
@@ -67,13 +67,50 @@ async def on_check_subscription(
     session: AsyncSession,
     db_user: User,
 ) -> None:
-    # FIX: call.message может быть None или InaccessibleMessage (aiogram 3)
     if call.message is None or isinstance(call.message, InaccessibleMessage):
         await call.answer("❌ Не удалось обработать запрос", show_alert=True)
         return
 
     await call.answer()
-    await _confirm_subscription(call.message, session, db_user)
+
+    log_repo = LogRepository(session)
+    user_repo = UserRepository(session)
+    is_subscribed = await check_all_subscriptions(call.bot, session, db_user.telegram_id)
+
+    if not is_subscribed:
+        await log_repo.log(
+            ActionType.SUB_FAILED,
+            user_id=db_user.id,
+            telegram_id=db_user.telegram_id,
+        )
+        # FIX: редактируем существующее сообщение вместо отправки нового.
+        # Это убирает спам "❌ Вы ещё не подписались" при каждой попытке.
+        try:
+            await call.message.edit_text(
+                "❌ Вы ещё не подписались на все каналы.",
+                reply_markup=await subscription_keyboard(session),
+            )
+        except TelegramBadRequest:
+            # Текст уже совпадает — ничего не делаем
+            pass
+        return
+
+    # Подписался — удаляем сообщение с кнопкой и отправляем финальное
+    await user_repo.set_subscribed(db_user.id, True)
+    await log_repo.log(
+        ActionType.SUB_PASSED,
+        user_id=db_user.id,
+        telegram_id=db_user.telegram_id,
+    )
+
+    # FIX: удаляем сообщение с кнопкой "✅ Я подписался" после успешной проверки
+    await _delete_safe(call.message)
+
+    bot_settings = await get_settings(session)
+    await call.message.answer(
+        bot_settings.after_sub_text,
+        reply_markup=main_menu_keyboard(),
+    )
 
 
 # ── Проверка подписки (кнопка Reply-клавиатуры) ───────────────
@@ -94,12 +131,8 @@ async def _handle_subscription_check(
     session: AsyncSession,
     db_user: User,
     *,
-    bot_settings=None,  # передаём, чтобы не делать лишний запрос к БД
+    bot_settings=None,
 ) -> None:
-    """
-    Вызывается из cmd_start. Учитывает был ли пользователь подписан раньше,
-    чтобы показать after_sub_text только при первой подписке.
-    """
     log_repo = LogRepository(session)
     user_repo = UserRepository(session)
 
@@ -130,13 +163,11 @@ async def _handle_subscription_check(
         bot_settings = await get_settings(session)
 
     if not was_subscribed:
-        # Только что подписался — показываем приветственный текст после подписки
         await message.answer(
             bot_settings.after_sub_text,
             reply_markup=main_menu_keyboard(),
         )
     else:
-        # Уже был подписан — просто открываем меню
         await message.answer("🏠 Главное меню", reply_markup=main_menu_keyboard())
 
 
@@ -145,12 +176,6 @@ async def _confirm_subscription(
     session: AsyncSession,
     db_user: User,
 ) -> None:
-    """
-    Вызывается из on_check_subscription и on_check_subscription_text.
-    Проверяет подписку и либо просит подписаться, либо открывает меню.
-
-    FIX: ранее эта логика была продублирована в двух хендлерах.
-    """
     log_repo = LogRepository(session)
     user_repo = UserRepository(session)
 
@@ -175,3 +200,11 @@ async def _confirm_subscription(
         bot_settings.after_sub_text,
         reply_markup=main_menu_keyboard(),
     )
+
+
+async def _delete_safe(message: Message) -> None:
+    """Удаляет сообщение, игнорируя ошибки (уже удалено, нет прав и т.п.)."""
+    try:
+        await message.delete()
+    except (TelegramBadRequest, Exception) as e:
+        logger.debug("could not delete message %s: %s", message.message_id, e)
