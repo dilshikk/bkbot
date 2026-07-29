@@ -8,6 +8,7 @@ from bot.core.logging import setup_logging
 from bot.database.session import AsyncSessionFactory
 from bot.middlewares.db import DbSessionMiddleware
 from bot.middlewares.user_sync import UserSyncMiddleware
+from bot.middlewares.maintenance import MaintenanceMiddleware
 from bot.middlewares.ban_check import BanCheckMiddleware
 from bot.middlewares.throttle import ThrottleMiddleware
 from bot.middlewares.subscription_guard import SubscriptionGuardMiddleware
@@ -33,27 +34,24 @@ async def main() -> None:
     )
     dp = Dispatcher()
 
-    # ── Middlewares (порядок важен) ──────────────────────────
+    # ── Middlewares (порядок критически важен) ───────────────
     #
-    # dp.update.outer_middleware → применяется ко ВСЕМ типам апдейтов
-    # dp.message.outer_middleware → только к Message
-    #
-    # DbSessionMiddleware и UserSyncMiddleware нужны всегда — на dp.update.
-    # PrivateOnlyMiddleware, BanCheck, Throttle — только для Message.
-    # SubscriptionGuardMiddleware — для Message И CallbackQuery → dp.update.
-    #
-    # ВАЖНО: SubscriptionGuardMiddleware был на dp.message → callback_query
-    # полностью обходил проверку подписки. Перенесён на dp.update.
+    # 1. DbSessionMiddleware      — открыть сессию (нужна всем остальным)
+    # 2. UserSyncMiddleware        — получить/создать db_user
+    # 3. MaintenanceMiddleware     — тех. работы: блокировать всех кроме админов
+    # 4. PrivateOnlyMiddleware     — только личные сообщения (только Message)
+    # 5. BanCheckMiddleware        — проверить бан (только Message)
+    # 6. ThrottleMiddleware        — антиспам (только Message)
+    # 7. SubscriptionGuardMiddleware — проверить подписку (Message + CallbackQuery)
 
     dp.update.outer_middleware(DbSessionMiddleware())
     dp.update.outer_middleware(UserSyncMiddleware())
+    dp.update.outer_middleware(MaintenanceMiddleware())  # ← после session/user
 
     dp.message.outer_middleware(PrivateOnlyMiddleware(cooldown=300))
     dp.message.outer_middleware(BanCheckMiddleware())
     dp.message.outer_middleware(ThrottleMiddleware())
 
-    # SubscriptionGuard — после Throttle (чтобы спаммеры до него не доходили),
-    # но на уровне update чтобы ловить и callback_query
     dp.update.outer_middleware(SubscriptionGuardMiddleware())
 
     # ── Routers ──────────────────────────────────────────────
@@ -68,7 +66,6 @@ async def main() -> None:
         [job.id for job in scheduler.get_jobs()],
     )
 
-    # ── Startup уведомление ──────────────────────────────────
     await _notify_startup(bot)
 
     try:
@@ -86,7 +83,6 @@ async def main() -> None:
 
 
 async def _notify_startup(bot: Bot) -> None:
-    """Уведомляем всех админов что бот запустился."""
     from bot.scheduler.tasks import _notify_admins
     await _notify_admins(bot, "✅ <b>Бот запущен</b>")
 
