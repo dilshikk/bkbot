@@ -1,4 +1,4 @@
-﻿"""
+"""
 Антиспам на Redis.
 
 Алгоритм — sliding window (скользящее окно):
@@ -9,6 +9,8 @@
 
 При превышении THROTTLE_BAN_COUNT нарушений подряд
 пользователь получает временный бан на THROTTLE_BAN_TTL секунд.
+
+Администраторы (settings.ADMIN_IDS) полностью освобождены от лимитов.
 """
 from __future__ import annotations
 
@@ -32,6 +34,7 @@ class ThrottleMiddleware(BaseMiddleware):
     """
     Redis sliding-window антиспам.
     Работает корректно при нескольких инстансах бота.
+    Администраторы пропускаются без проверки.
     """
 
     async def __call__(
@@ -43,12 +46,17 @@ class ThrottleMiddleware(BaseMiddleware):
         if not isinstance(event, Message) or event.from_user is None:
             return await handler(event, data)
 
+        user_id = event.from_user.id
+
         # Всегда пропускаем /start
         if (event.text or "").startswith("/start"):
             return await handler(event, data)
 
-        user_id = event.from_user.id
-        redis   = await get_redis()
+        # Администраторы освобождены от всех throttle-ограничений
+        if user_id in settings.ADMIN_IDS:
+            return await handler(event, data)
+
+        redis = await get_redis()
 
         # Проверяем временный бан
         if await _is_banned(redis, user_id):
