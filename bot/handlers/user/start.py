@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from aiogram import Router, F
@@ -14,7 +13,10 @@ from bot.keyboards.user import main_menu_keyboard, subscription_keyboard
 from bot.repositories.log_repo import LogRepository
 from bot.repositories.user_repo import UserRepository
 from bot.services.settings_service import get_settings
-from bot.services.subscription_service import check_all_subscriptions
+from bot.services.subscription_service import (
+    check_all_subscriptions,
+    invalidate_subscription_cache,
+)
 
 router = Router(name="user.start")
 logger = logging.getLogger(__name__)
@@ -73,9 +75,15 @@ async def on_check_subscription(
 
     await call.answer()
 
+    # Пользователь нажал кнопку — сбрасываем кэш и идём напрямую к Telegram API
+    # use_cache=False гарантирует свежий результат без задержки 60 секунд
+    await invalidate_subscription_cache(db_user.telegram_id)
+
     log_repo = LogRepository(session)
     user_repo = UserRepository(session)
-    is_subscribed = await check_all_subscriptions(call.bot, session, db_user.telegram_id)
+    is_subscribed = await check_all_subscriptions(
+        call.bot, session, db_user.telegram_id, use_cache=False
+    )
 
     if not is_subscribed:
         await log_repo.log(
@@ -83,19 +91,16 @@ async def on_check_subscription(
             user_id=db_user.id,
             telegram_id=db_user.telegram_id,
         )
-        # FIX: редактируем существующее сообщение вместо отправки нового.
-        # Это убирает спам "❌ Вы ещё не подписались" при каждой попытке.
         try:
             await call.message.edit_text(
                 "❌ Вы ещё не подписались на все каналы.",
                 reply_markup=await subscription_keyboard(session),
             )
         except TelegramBadRequest:
-            # Текст уже совпадает — ничего не делаем
             pass
         return
 
-    # Подписался — удаляем сообщение с кнопкой и отправляем финальное
+    # Успешная подписка
     await user_repo.set_subscribed(db_user.id, True)
     await log_repo.log(
         ActionType.SUB_PASSED,
@@ -103,7 +108,6 @@ async def on_check_subscription(
         telegram_id=db_user.telegram_id,
     )
 
-    # FIX: удаляем сообщение с кнопкой "✅ Я подписался" после успешной проверки
     await _delete_safe(call.message)
 
     bot_settings = await get_settings(session)
@@ -133,11 +137,15 @@ async def _handle_subscription_check(
     *,
     bot_settings=None,
 ) -> None:
+    """Вызывается из cmd_start. Использует кэш — первый /start не тормозит."""
     log_repo = LogRepository(session)
     user_repo = UserRepository(session)
 
     was_subscribed = db_user.is_subscribed
-    is_subscribed = await check_all_subscriptions(message.bot, session, db_user.telegram_id)
+    # /start — используем кэш (use_cache=True по умолчанию)
+    is_subscribed = await check_all_subscriptions(
+        message.bot, session, db_user.telegram_id
+    )
 
     if not is_subscribed:
         await user_repo.set_subscribed(db_user.id, False)
@@ -176,10 +184,15 @@ async def _confirm_subscription(
     session: AsyncSession,
     db_user: User,
 ) -> None:
+    """Вызывается из reply-кнопки. Инвалидирует кэш для свежей проверки."""
+    await invalidate_subscription_cache(db_user.telegram_id)
+
     log_repo = LogRepository(session)
     user_repo = UserRepository(session)
 
-    is_subscribed = await check_all_subscriptions(message.bot, session, db_user.telegram_id)
+    is_subscribed = await check_all_subscriptions(
+        message.bot, session, db_user.telegram_id, use_cache=False
+    )
 
     if not is_subscribed:
         await message.answer(
@@ -203,7 +216,7 @@ async def _confirm_subscription(
 
 
 async def _delete_safe(message: Message) -> None:
-    """Удаляет сообщение, игнорируя ошибки (уже удалено, нет прав и т.п.)."""
+    """Удаляет сообщение, игнорируя ошибки."""
     try:
         await message.delete()
     except (TelegramBadRequest, Exception) as e:
