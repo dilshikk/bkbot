@@ -1,0 +1,14 @@
+aiogram==3.15.0
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+apscheduler==3.10.4
+aiohttp==3.10.11
+pydantic-settings==2.6.0
+redis[hiredis]==5.2.0
+loguru==0.7.2
+pytest==8.3.0
+pytest-asyncio==0.24.0
+pytest-cov==6.0.0
+aiosqlite==0.20.0
+fakeredis==2.26.0

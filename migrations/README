@@ -1,0 +1,19 @@
+cd /www/wwwroot/bkbot
+
+# Инициализируем Alembic (один раз)
+# НЕ запускать если папка migrations уже есть
+alembic init -t async migrations
+
+# Заменяем env.py и script.py.mako на файлы выше
+
+# Создаём первую миграцию
+alembic revision --autogenerate -m "init"
+
+# Применяем к БД
+alembic upgrade head
+
+# Проверяем текущую ревизию
+alembic current
+
+# Откат на одну ревизию назад
+alembic downgrade -1
