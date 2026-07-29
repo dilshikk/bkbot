@@ -1,4 +1,4 @@
-﻿"""
+"""
 Сервис рассылки.
 
 Батчинг: по 30 пользователей с задержкой 0.05 сек между сообщениями.
@@ -8,10 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
+from aiogram.exceptions import (
+    TelegramForbiddenError,
+    TelegramBadRequest,
+    TelegramRetryAfter,
+)
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -22,13 +26,20 @@ from bot.database.models import Broadcast, BroadcastStatus, User, UserStatus
 
 logger = logging.getLogger(__name__)
 
-_BATCH_SIZE  = 30    # сообщений за одну итерацию
-_SEND_DELAY  = 0.05  # секунд между отправками
+_BATCH_SIZE = 30    # сообщений за одну итерацию
+_SEND_DELAY = 0.05  # секунд между отправками
+# Проверяем статус рассылки раз в N пользователей, а не каждый раз
+_CANCEL_CHECK_INTERVAL = 50
+
+
+def _utcnow() -> datetime:
+    """Текущее UTC время без tzinfo (naive) для совместимости с БД."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class BroadcastService:
     def __init__(self, session: AsyncSession, bot: Bot) -> None:
-        self._s   = session
+        self._s = session
         self._bot = bot
 
     # ── Подготовка ──────────────────────────────────────────
@@ -69,9 +80,10 @@ class BroadcastService:
             )
         ) or 0
 
-        broadcast.status     = BroadcastStatus.RUNNING
-        broadcast.started_at = datetime.utcnow()
-        broadcast.total      = total
+        broadcast.status = BroadcastStatus.RUNNING
+        # FIX: заменён deprecated datetime.utcnow()
+        broadcast.started_at = _utcnow()
+        broadcast.total = total
         await self._s.commit()
 
         create_background_task(
@@ -110,7 +122,7 @@ async def run_broadcast_task(
 
         kb = _build_keyboard(broadcast.buttons)
         offset = 0
-        sent = failed = 0
+        sent = failed = processed = 0
 
         try:
             while True:
@@ -127,14 +139,18 @@ async def run_broadcast_task(
                     break
 
                 for telegram_id in batch:
-                    # Проверяем не отменили ли рассылку
-                    await session.refresh(broadcast)
-                    if broadcast.status == BroadcastStatus.CANCELLED:
-                        broadcast.sent = sent
-                        broadcast.failed = failed
-                        await session.commit()
-                        logger.info("broadcast_id=%s cancelled mid-flight", broadcast_id)
-                        return
+                    # FIX: проверяем отмену раз в N пользователей, а не каждый раз.
+                    # Ранее session.refresh(broadcast) вызывался для КАЖДОГО
+                    # пользователя — при 10к юзеров это 10к лишних запросов к БД.
+                    processed += 1
+                    if processed % _CANCEL_CHECK_INTERVAL == 0:
+                        await session.refresh(broadcast)
+                        if broadcast.status == BroadcastStatus.CANCELLED:
+                            broadcast.sent = sent
+                            broadcast.failed = failed
+                            await session.commit()
+                            logger.info("broadcast_id=%s cancelled mid-flight", broadcast_id)
+                            return
 
                     success = await _send_one(bot, telegram_id, broadcast, kb)
                     if success:
@@ -145,17 +161,18 @@ async def run_broadcast_task(
                     await asyncio.sleep(_SEND_DELAY)
 
                 # Обновляем прогресс после каждого батча
-                broadcast.sent   = sent
+                broadcast.sent = sent
                 broadcast.failed = failed
                 await session.commit()
 
                 offset += _BATCH_SIZE
 
             # Завершено
-            broadcast.status      = BroadcastStatus.DONE
-            broadcast.finished_at = datetime.utcnow()
-            broadcast.sent        = sent
-            broadcast.failed      = failed
+            broadcast.status = BroadcastStatus.DONE
+            # FIX: заменён deprecated datetime.utcnow()
+            broadcast.finished_at = _utcnow()
+            broadcast.sent = sent
+            broadcast.failed = failed
             await session.commit()
 
             logger.info(
@@ -192,9 +209,16 @@ async def _send_one(
                 text=broadcast.text,
                 parse_mode="HTML",
                 reply_markup=kb,
-                disable_web_page_preview=True,
+                # FIX: disable_web_page_preview deprecated в aiogram 3.x
+                link_preview_options={"is_disabled": True},
             )
         return True
+
+    except TelegramRetryAfter as e:
+        # FIX: обработка 429 Too Many Requests — ждём и повторяем
+        logger.warning("rate limited, sleeping %ss", e.retry_after)
+        await asyncio.sleep(e.retry_after)
+        return await _send_one(bot, telegram_id, broadcast, kb)
 
     except TelegramForbiddenError:
         # Пользователь заблокировал бота — не спамим в лог
