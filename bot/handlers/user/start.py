@@ -48,11 +48,9 @@ async def cmd_start(
         meta={"source": payload},
     )
 
+    # Проверку maintenance убрали — она теперь в MaintenanceMiddleware
+    # и блокирует весь бот до того как запросы дойдут до хендлеров
     bot_settings = await get_settings(session)
-
-    if bot_settings.maintenance:
-        await message.answer(bot_settings.maintenance_text)
-        return
 
     await message.answer(
         bot_settings.welcome_text.format(name=db_user.full_name),
@@ -75,8 +73,6 @@ async def on_check_subscription(
 
     await call.answer()
 
-    # Пользователь нажал кнопку — сбрасываем кэш и идём напрямую к Telegram API
-    # use_cache=False гарантирует свежий результат без задержки 60 секунд
     await invalidate_subscription_cache(db_user.telegram_id)
 
     log_repo = LogRepository(session)
@@ -100,7 +96,6 @@ async def on_check_subscription(
             pass
         return
 
-    # Успешная подписка
     await user_repo.set_subscribed(db_user.id, True)
     await log_repo.log(
         ActionType.SUB_PASSED,
@@ -137,12 +132,10 @@ async def _handle_subscription_check(
     *,
     bot_settings=None,
 ) -> None:
-    """Вызывается из cmd_start. Использует кэш — первый /start не тормозит."""
     log_repo = LogRepository(session)
     user_repo = UserRepository(session)
 
     was_subscribed = db_user.is_subscribed
-    # /start — используем кэш (use_cache=True по умолчанию)
     is_subscribed = await check_all_subscriptions(
         message.bot, session, db_user.telegram_id
     )
@@ -184,7 +177,6 @@ async def _confirm_subscription(
     session: AsyncSession,
     db_user: User,
 ) -> None:
-    """Вызывается из reply-кнопки. Инвалидирует кэш для свежей проверки."""
     await invalidate_subscription_cache(db_user.telegram_id)
 
     log_repo = LogRepository(session)
@@ -216,7 +208,6 @@ async def _confirm_subscription(
 
 
 async def _delete_safe(message: Message) -> None:
-    """Удаляет сообщение, игнорируя ошибки."""
     try:
         await message.delete()
     except (TelegramBadRequest, Exception) as e:
