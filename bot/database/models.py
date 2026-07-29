@@ -5,7 +5,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger, Boolean, DateTime, ForeignKey,
-    Integer, String, Text, JSON, UniqueConstraint, Index,
+    Integer, String, Text, JSON, Index,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -57,7 +57,7 @@ class User(Base, TimestampMixin):
     first_name:  Mapped[str | None] = mapped_column(String(128))
     last_name:   Mapped[str | None] = mapped_column(String(128))
     language:    Mapped[str]  = mapped_column(String(8), default="ru", server_default="ru")
-    source:      Mapped[str | None] = mapped_column(String(128))   # ?start=instagram
+    source:      Mapped[str | None] = mapped_column(String(128))
     ref_code:    Mapped[str | None] = mapped_column(String(64), index=True)
     status:      Mapped[str]  = mapped_column(String(16), default=UserStatus.ACTIVE, server_default="active")
     ban_reason:  Mapped[str | None] = mapped_column(String(256))
@@ -102,6 +102,9 @@ class Link(Base, TimestampMixin):
     is_fallback: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     # Мягкое удаление
     is_deleted:  Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # FIX: поле добавлено явно — ранее обращались через getattr() в mirror handler,
+    # что скрывало отсутствие поля в схеме и могло привести к ошибкам при миграциях
+    photo_file_id: Mapped[str | None] = mapped_column(String(256))
 
     __table_args__ = (
         Index("ix_links_active_healthy", "is_active", "is_healthy", "is_deleted"),
@@ -150,19 +153,19 @@ class Settings(Base, TimestampMixin):
 class Broadcast(Base, TimestampMixin):
     __tablename__ = "broadcasts"
 
-    id:           Mapped[int]  = mapped_column(Integer, primary_key=True, autoincrement=True)
-    text:         Mapped[str | None] = mapped_column(Text)
+    id:            Mapped[int]  = mapped_column(Integer, primary_key=True, autoincrement=True)
+    text:          Mapped[str | None] = mapped_column(Text)
     photo_file_id: Mapped[str | None] = mapped_column(String(256))
     # Inline-кнопки: [{"text": "...", "url": "..."}]
-    buttons:      Mapped[dict | None]  = mapped_column(JSON)
-    status:       Mapped[str]  = mapped_column(String(16), default=BroadcastStatus.DRAFT)
-    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime)
-    started_at:   Mapped[datetime | None] = mapped_column(DateTime)
-    finished_at:  Mapped[datetime | None] = mapped_column(DateTime)
-    total:        Mapped[int]  = mapped_column(Integer, default=0)
-    sent:         Mapped[int]  = mapped_column(Integer, default=0)
-    failed:       Mapped[int]  = mapped_column(Integer, default=0)
-    created_by:   Mapped[int | None] = mapped_column(BigInteger)
+    buttons:       Mapped[dict | None]  = mapped_column(JSON)
+    status:        Mapped[str]  = mapped_column(String(16), default=BroadcastStatus.DRAFT)
+    scheduled_at:  Mapped[datetime | None] = mapped_column(DateTime)
+    started_at:    Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at:   Mapped[datetime | None] = mapped_column(DateTime)
+    total:         Mapped[int]  = mapped_column(Integer, default=0)
+    sent:          Mapped[int]  = mapped_column(Integer, default=0)
+    failed:        Mapped[int]  = mapped_column(Integer, default=0)
+    created_by:    Mapped[int | None] = mapped_column(BigInteger)
 
 
 # ─────────────────────────────────────────────
@@ -172,12 +175,12 @@ class Broadcast(Base, TimestampMixin):
 class ActionLog(Base):
     __tablename__ = "action_logs"
 
-    id:         Mapped[int]  = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id:    Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    id:          Mapped[int]  = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id:     Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     telegram_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
-    action:     Mapped[str]  = mapped_column(String(32), nullable=False, index=True)
-    meta:       Mapped[dict | None] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default="now()", index=True)
+    action:      Mapped[str]  = mapped_column(String(32), nullable=False, index=True)
+    meta:        Mapped[dict | None] = mapped_column(JSON)
+    created_at:  Mapped[datetime] = mapped_column(DateTime, server_default="now()", index=True)
 
     user: Mapped[User | None] = relationship(back_populates="logs", lazy="noload")
 
