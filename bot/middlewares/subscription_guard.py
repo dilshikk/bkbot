@@ -7,6 +7,7 @@ from aiogram import BaseMiddleware
 from aiogram.types import Message, CallbackQuery, TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.core.config import settings
 from bot.database.models import User
 from bot.repositories.user_repo import UserRepository
 from bot.services.subscription_service import check_all_subscriptions
@@ -22,10 +23,7 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
     """
     Перехватывает каждый апдейт.
     Если пользователь отписался — показывает экран подписки.
-
-    FIX: ранее middleware перехватывала только Message, callback_query
-    полностью обходил проверку подписки — пользователь мог использовать
-    inline-кнопки без подписки на каналы.
+    Администраторы (settings.ADMIN_IDS) полностью освобождены от проверки.
     """
 
     async def __call__(
@@ -34,6 +32,11 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        # Администраторы — пропускаем без проверки подписки
+        user_id = _extract_user_id(event)
+        if user_id in settings.ADMIN_IDS:
+            return await handler(event, data)
+
         # Обрабатываем только Message и CallbackQuery
         if isinstance(event, Message):
             return await self._handle_message(handler, event, data)
@@ -66,8 +69,6 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         if not await self._is_subscribed(event, data):
-            # FIX: для callback отвечаем через answer(), а не через message.answer()
-            # чтобы убрать "часики" у кнопки
             await event.answer(
                 "📢 Вы отписались от одного из каналов. Подпишитесь снова.",
                 show_alert=True,
@@ -80,10 +81,6 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
         event: Message | CallbackQuery,
         data: dict[str, Any],
     ) -> bool:
-        """
-        Проверяет подписку и при необходимости обновляет флаг в БД.
-        Возвращает True если подписан, False — если нет.
-        """
         db_user: User | None = data.get("db_user")
         if db_user is None:
             return True
@@ -97,7 +94,6 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
             user_repo = UserRepository(session)
             await user_repo.set_subscribed(db_user.id, False)
 
-            # Только для Message показываем клавиатуру с каналами
             if isinstance(event, Message):
                 await event.answer(
                     "📢 Вы отписались от одного из каналов.\n"
@@ -107,3 +103,16 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
             return False
 
         return True
+
+
+def _extract_user_id(event: TelegramObject) -> int:
+    """Извлекает telegram_id пользователя из любого типа апдейта."""
+    from_user = getattr(event, "from_user", None)
+    if from_user is not None:
+        return from_user.id
+    # Update-level апдейты
+    if hasattr(event, "message") and event.message and event.message.from_user:
+        return event.message.from_user.id
+    if hasattr(event, "callback_query") and event.callback_query and event.callback_query.from_user:
+        return event.callback_query.from_user.id
+    return 0
