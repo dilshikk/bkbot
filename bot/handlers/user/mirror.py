@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from urllib.parse import quote
 
@@ -20,7 +20,6 @@ from bot.services.link_service import LinkService
 
 router = Router(name="user.mirror")
 
-# Telegram API возвращает этот текст, когда содержимое сообщения не изменилось
 _MSG_NOT_MODIFIED = "message is not modified"
 
 
@@ -37,7 +36,6 @@ async def refresh_mirror(
     session: AsyncSession,
     db_user: User,
 ) -> None:
-    # FIX: call.message может быть None или InaccessibleMessage (aiogram 3)
     if call.message is None or isinstance(call.message, InaccessibleMessage):
         await call.answer("❌ Не удалось обновить сообщение", show_alert=True)
         return
@@ -67,21 +65,19 @@ async def _send_mirror(
             meta={"result": "no_active_link"},
         )
         return
+
+    # URL скрыт за гиперссылкой — пользователь видит красивый текст
     text = (
         "🎯 <b>Актуальное рабочее зеркало</b>\n\n"
-        f"<code>{link.url}</code>\n\n"
+        f'👉 <a href="{link.url}">Перейти на сайт</a>\n\n'
         "🤖 <b>Отправлено ботом:</b> @xBet_1xbot"
     )
     kb = _build_keyboard(link.url)
 
-    # FIX: getattr — code smell, указывает что поле не объявлено в модели.
-    # Если photo_file_id есть в модели — обратитесь к нему напрямую.
-    # Оставлено с комментарием до уточнения схемы.
     photo_id: str | None = getattr(link, "photo_file_id", None)
 
     await _dispatch_message(message, text, kb, photo_id, edit)
 
-    # FIX: инкремент счётчика переходов (ранее отсутствовал полностью)
     await link_service.increment_click(link.id)
 
     await log_repo.log(
@@ -93,7 +89,6 @@ async def _send_mirror(
 
 
 async def _handle_no_link(message: Message, edit: bool) -> None:
-    """Показывает сообщение об отсутствии активного зеркала."""
     text = (
         "⏳ <b>Зеркало временно обновляется.</b>\n\n"
         "Попробуйте через несколько минут."
@@ -119,14 +114,6 @@ async def _dispatch_message(
     photo_id: str | None,
     edit: bool,
 ) -> None:
-    """
-    Выбирает стратегию отправки/редактирования сообщения в зависимости
-    от наличия фото и флага edit.
-
-    При edit=True Telegram может вернуть ошибку, если тип контента
-    не совпадает (фото ↔ текст). В этом случае удаляем старое сообщение
-    и создаём новое.
-    """
     if photo_id:
         await _dispatch_photo(message, text, kb, photo_id, edit)
     else:
@@ -158,8 +145,6 @@ async def _dispatch_photo(
         exc_text = str(exc)
         if _MSG_NOT_MODIFIED in exc_text:
             return
-        # Исходное сообщение было текстовым — edit_media неприменим,
-        # пересоздаём сообщение.
         await _delete_safe(message)
         await message.answer_photo(
             photo=photo_id,
@@ -185,14 +170,11 @@ async def _dispatch_text(
         exc_text = str(exc)
         if _MSG_NOT_MODIFIED in exc_text:
             return
-        # Исходное сообщение было с фото — edit_text на него не сработает,
-        # пересоздаём сообщение.
         await _delete_safe(message)
         await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
 async def _delete_safe(message: Message) -> None:
-    """Удаляет сообщение, игнорируя ошибки (уже удалено / нет прав)."""
     try:
         await message.delete()
     except TelegramBadRequest:
@@ -200,7 +182,6 @@ async def _delete_safe(message: Message) -> None:
 
 
 def _build_keyboard(url: str) -> InlineKeyboardMarkup:
-    """Строит inline-клавиатуру с кнопками перехода, шаринга и обновления."""
     share_url = (
         "https://t.me/share/url"
         f"?url={quote(url)}"
