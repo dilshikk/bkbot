@@ -140,12 +140,11 @@ class Settings(Base, TimestampMixin):
     updated_by:        Mapped[int | None] = mapped_column(BigInteger)
 
     # ── Приложение (APK) ──────────────────────────────────────
-    # app_enabled: показывать ли кнопку "📱 Получить приложение" пользователям
-    # app_file_id: Telegram file_id загруженного APK-файла
-    # app_caption: текст/описание, которое бот отправляет вместе с файлом
-    app_enabled:  Mapped[bool]      = mapped_column(Boolean, default=False, server_default="false")
-    app_file_id:  Mapped[str | None] = mapped_column(String(256))
-    app_caption:  Mapped[str | None] = mapped_column(Text)
+    app_enabled:        Mapped[bool]      = mapped_column(Boolean, default=False, server_default="false")
+    app_file_id:        Mapped[str | None] = mapped_column(String(256))
+    app_caption:        Mapped[str | None] = mapped_column(Text)
+    app_download_count: Mapped[int]        = mapped_column(Integer, default=0, server_default="0")
+    app_file_name:      Mapped[str | None] = mapped_column(String(256))
 
 
 # ─────────────────────────────────────────────
