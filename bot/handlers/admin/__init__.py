@@ -1,4 +1,4 @@
-﻿from aiogram import Router, F
+from aiogram import Router, F
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models import User
 from bot.filters.admin import IsAdmin
-from bot.handlers.admin import dashboard, links, channels, settings, broadcast, users, stats
+from bot.handlers.admin import dashboard, links, channels, settings, broadcast, users, stats, app
 
 router = Router(name="admin")
 
@@ -52,3 +52,4 @@ router.include_router(channels.router)
 router.include_router(settings.router)
 router.include_router(broadcast.router)
 router.include_router(users.router)
+router.include_router(app.router)
