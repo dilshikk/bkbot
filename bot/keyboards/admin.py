@@ -1,4 +1,4 @@
-﻿from aiogram.types import (
+from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
@@ -22,7 +22,8 @@ def admin_main_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📊 Dashboard")],
             [KeyboardButton(text="🔗 Ссылки"), KeyboardButton(text="📢 Каналы")],
             [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="👥 Пользователи")],
-            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="🏠 В меню")],
+            [KeyboardButton(text="📱 Приложение"), KeyboardButton(text="⚙️ Настройки")],
+            [KeyboardButton(text="🏠 В меню")],
         ],
         resize_keyboard=True,
     )
