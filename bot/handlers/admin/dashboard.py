@@ -38,6 +38,7 @@ async def dashboard(message: Message, session: AsyncSession) -> None:
 
     app_btn    = "🟢 Видна пользователям" if settings.app_enabled else "⚪️ Скрыта"
     app_file   = "✅ Загружен" if settings.app_file_id else "❌ Не загружен"
+    downloads  = f"{settings.app_download_count:,}"
 
     text = (
         f"📊 <b>Dashboard</b>\n"
@@ -50,7 +51,8 @@ async def dashboard(message: Message, session: AsyncSession) -> None:
         f"   Активное: <b>{active_link.title if active_link else '—'}</b>\n\n"
         f"📱 <b>Приложение</b>\n"
         f"   Кнопка: {app_btn}\n"
-        f"   APK-файл: {app_file}\n\n"
+        f"   APK-файл: {app_file}\n"
+        f"   Скачиваний: <b>{downloads}</b>\n\n"
         f"⚙️ <b>Настройки</b>\n"
         f"   Бот: {'✅ Работает' if settings.bot_enabled else '🔴 Выключен'}\n"
         f"   Техработы: {'🔧 Да' if settings.maintenance else '✅ Нет'}\n"
