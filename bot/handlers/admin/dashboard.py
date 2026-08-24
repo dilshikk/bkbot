@@ -1,7 +1,7 @@
-﻿#Файл: /www/wwwroot/bkbot/bot/handlers/admin/stats.py
+#Файл: /www/wwwroot/bkbot/bot/handlers/admin/dashboard.py
 from aiogram import Router, F
 from aiogram.filters import Command
-from aiogram.types import Message, BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat
+from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.filters.admin import IsAdmin
@@ -27,14 +27,17 @@ async def dashboard(message: Message, session: AsyncSession) -> None:
     user_repo = UserRepository(session)
     link_repo = LinkRepository(session)
     settings  = await get_settings(session)
-    links      = await link_repo.get_all()
+    links     = await link_repo.get_all()
 
     active_link = next((l for l in links if l.is_active), None)
     total_links = len(links)
-    healthy      = sum(1 for l in links if l.is_healthy)
+    healthy     = sum(1 for l in links if l.is_healthy)
 
     total_users = await user_repo.count_total()
     today_users = await user_repo.count_today()
+
+    app_btn    = "🟢 Видна пользователям" if settings.app_enabled else "⚪️ Скрыта"
+    app_file   = "✅ Загружен" if settings.app_file_id else "❌ Не загружен"
 
     text = (
         f"📊 <b>Dashboard</b>\n"
@@ -45,6 +48,9 @@ async def dashboard(message: Message, session: AsyncSession) -> None:
         f"🔗 <b>Зеркала</b>\n"
         f"   Всего: <b>{total_links}</b> | Здоровых: <b>{healthy}</b>\n"
         f"   Активное: <b>{active_link.title if active_link else '—'}</b>\n\n"
+        f"📱 <b>Приложение</b>\n"
+        f"   Кнопка: {app_btn}\n"
+        f"   APK-файл: {app_file}\n\n"
         f"⚙️ <b>Настройки</b>\n"
         f"   Бот: {'✅ Работает' if settings.bot_enabled else '🔴 Выключен'}\n"
         f"   Техработы: {'🔧 Да' if settings.maintenance else '✅ Нет'}\n"
