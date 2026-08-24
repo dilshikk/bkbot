@@ -1,4 +1,4 @@
-﻿# bot/handlers/admin/broadcast.py
+# bot/handlers/admin/broadcast.py
 from __future__ import annotations
 
 import asyncio
@@ -89,7 +89,11 @@ async def bc_new(call: CallbackQuery, state: FSMContext, session: AsyncSession) 
     await state.update_data(broadcast_id=broadcast.id)
 
     await call.message.answer(
-        "✏️ Введите <b>текст</b> рассылки (HTML поддерживается).\n\n"
+        "✏️ <b>Шаг 1 из 3 — Текст</b>\n\n"
+        "Введите текст рассылки. Поддерживается HTML-разметка:\n"
+        "<code>&lt;b&gt;жирный&lt;/b&gt;</code>, "
+        "<code>&lt;i&gt;курсив&lt;/i&gt;</code>, "
+        "<code>&lt;a href='...'&gt;ссылка&lt;/a&gt;</code>\n\n"
         "Или отправьте <code>-</code> чтобы пропустить (если будет только фото).",
         parse_mode="HTML",
         reply_markup=cancel_keyboard,
@@ -135,8 +139,9 @@ async def bc_enter_text(
         await session.flush()
 
     await message.answer(
-        "📸 Отправьте <b>фото</b> для рассылки.\n"
-        "Или «-» чтобы пропустить:",
+        "📸 <b>Шаг 2 из 3 — Фото</b>\n\n"
+        "Отправьте фото для рассылки (будет показано над текстом).\n\n"
+        "Или отправьте <code>-</code> чтобы пропустить.",
         parse_mode="HTML",
         reply_markup=cancel_keyboard,
     )
@@ -193,9 +198,10 @@ async def bc_skip_photo(
 
 async def _ask_buttons(message: Message, state: FSMContext) -> None:
     await message.answer(
-        "🔗 Добавьте inline-кнопки в формате:\n"
+        "🔗 <b>Шаг 3 из 3 — Кнопки</b>\n\n"
+        "Добавьте inline-кнопки. Формат — каждая кнопка с новой строки:\n"
         "<code>Текст кнопки | https://url.com</code>\n\n"
-        "По одной на строку. Или «-» чтобы без кнопок.",
+        "Или отправьте <code>-</code> чтобы без кнопок.",
         parse_mode="HTML",
         reply_markup=cancel_keyboard,
     )
@@ -257,9 +263,9 @@ async def bc_enter_buttons(
     await state.clear()
 
     await message.answer(
-        f"✅ Черновик готов!\n\n"
+        f"✅ <b>Черновик готов!</b>\n\n"
         f"📄 Текст: {(broadcast.text or '—')[:100]}\n"
-        f"📸 Фото: {'Да' if broadcast.photo_file_id else 'Нет'}\n"
+        f"📸 Фото: {'✅ Да' if broadcast.photo_file_id else '❌ Нет'}\n"
         f"🔗 Кнопок: {len(buttons)}\n\n"
         f"Нажмите «👀 Предпросмотр» чтобы проверить,\n"
         f"затем «🚀 Запустить».",
