@@ -20,9 +20,10 @@ MENU_TRIGGERS: frozenset[str] = frozenset({
 })
 
 
-# ── Главное меню ──────────────────────────────────────────────
+# ── Главное меню (кнопки + команда /menu) ────────────────────
 
 @router.message(F.text.in_(MENU_TRIGGERS))
+@router.message(Command("menu"))
 async def show_main_menu(message: Message, session: AsyncSession) -> None:
     await message.answer(
         "Выберите действие:",
@@ -41,7 +42,8 @@ async def how_to_use(message: Message) -> None:
         "2️⃣ Перейдите по полученной ссылке\n"
         "3️⃣ Если ссылка не работает — нажмите снова\n\n"
         "Зеркала обновляются автоматически.\n"
-        "Бот всегда покажет актуальную ссылку."
+        "Бот всегда покажет актуальную ссылку.\n\n"
+        "💡 Команда /menu — открыть главное меню в любой момент."
     )
     await message.answer(text, parse_mode="HTML")
 
