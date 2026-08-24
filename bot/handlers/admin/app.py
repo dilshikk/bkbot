@@ -18,7 +18,7 @@ from bot.database.models import Settings, ActionType
 from bot.filters.admin import IsAdmin
 from bot.keyboards.admin import admin_main_keyboard, cancel_keyboard
 from bot.repositories.log_repo import LogRepository
-from bot.services.settings_service import get_settings
+from bot.services.settings_service import get_settings, SettingsData
 
 router = Router(name="admin.app")
 
@@ -26,18 +26,18 @@ router = Router(name="admin.app")
 # ── FSM ───────────────────────────────────────────────────────
 
 class AppFlow(StatesGroup):
-    upload_apk  = State()
+    upload_apk   = State()
     edit_caption = State()
 
 
 # ── Клавиатура раздела ────────────────────────────────────────
 
-def app_keyboard(s: Settings) -> InlineKeyboardMarkup:
+def app_keyboard(s: SettingsData) -> InlineKeyboardMarkup:
     toggle_text = "🔴 Скрыть кнопку у пользователей" if s.app_enabled else "🟢 Показать кнопку пользователям"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=toggle_text, callback_data="app_toggle_enabled")],
-        [InlineKeyboardButton(text="📤 Загрузить APK",    callback_data="app_upload_apk")],
-        [InlineKeyboardButton(text="✏️ Изменить описание", callback_data="app_edit_caption")],
+        [InlineKeyboardButton(text=toggle_text,              callback_data="app_toggle_enabled")],
+        [InlineKeyboardButton(text="📤 Загрузить APK",       callback_data="app_upload_apk")],
+        [InlineKeyboardButton(text="✏️ Изменить описание",   callback_data="app_edit_caption")],
     ])
 
 
@@ -49,14 +49,18 @@ async def show_app_section(message: Message, session: AsyncSession) -> None:
     await message.answer(_build_status_text(s), parse_mode="HTML", reply_markup=app_keyboard(s))
 
 
-def _build_status_text(s: Settings) -> str:
-    status   = "🟢 Кнопка видна пользователям" if s.app_enabled else "⚪️ Кнопка скрыта"
-    has_file = "✅ Загружен" if s.app_file_id else "❌ Не загружен"
-    caption  = s.app_caption or "—"
+def _build_status_text(s: SettingsData) -> str:
+    status    = "🟢 Кнопка видна пользователям" if s.app_enabled else "⚪️ Кнопка скрыта"
+    has_file  = "✅ Загружен" if s.app_file_id else "❌ Не загружен"
+    file_name = s.app_file_name or "—"
+    caption   = s.app_caption or "—"
+    downloads = f"{s.app_download_count:,}"
     return (
         f"📱 <b>Управление приложением</b>\n\n"
         f"Статус: {status}\n"
-        f"APK-файл: {has_file}\n\n"
+        f"APK-файл: {has_file}\n"
+        f"Имя файла: <code>{file_name}</code>\n"
+        f"Скачиваний: <b>{downloads}</b>\n\n"
         f"<b>Описание:</b>\n{caption}"
     )
 
@@ -80,7 +84,8 @@ async def app_toggle_enabled(call: CallbackQuery, session: AsyncSession) -> None
         meta={"action": "app_toggle_enabled", "app_enabled": s.app_enabled},
     )
 
-    await call.message.edit_text(_build_status_text(s), parse_mode="HTML", reply_markup=app_keyboard(s))
+    updated = await get_settings(session)
+    await call.message.edit_text(_build_status_text(updated), parse_mode="HTML", reply_markup=app_keyboard(updated))
     status_text = "🟢 Кнопка показана пользователям" if s.app_enabled else "⚪️ Кнопка скрыта"
     await call.answer(status_text)
 
@@ -120,18 +125,19 @@ async def app_upload_apk_done(
         return
 
     s = await _get_or_create(session)
-    s.app_file_id = doc.file_id
-    s.updated_by  = message.from_user.id
+    s.app_file_id   = doc.file_id
+    s.app_file_name = doc.file_name or f"app_{doc.file_unique_id}.apk"
+    s.updated_by    = message.from_user.id
     await session.flush()
 
     await LogRepository(session).log(
         ActionType.ADMIN_ACTION,
         telegram_id=message.from_user.id,
-        meta={"action": "app_apk_uploaded", "file_id": doc.file_id, "file_name": doc.file_name},
+        meta={"action": "app_apk_uploaded", "file_id": doc.file_id, "file_name": s.app_file_name},
     )
     await state.clear()
     await message.answer(
-        f"✅ APK сохранён.\nФайл: <code>{doc.file_name or doc.file_id}</code>",
+        f"✅ APK сохранён.\nФайл: <code>{s.app_file_name}</code>",
         parse_mode="HTML",
         reply_markup=admin_main_keyboard(),
     )
@@ -139,7 +145,6 @@ async def app_upload_apk_done(
 
 @router.message(AppFlow.upload_apk, IsAdmin())
 async def app_upload_apk_wrong(message: Message) -> None:
-    """Пользователь отправил не документ."""
     await message.answer(
         "❌ Нужен файл-документ (APK). Отправьте файл, а не фото или текст.",
         reply_markup=cancel_keyboard,
