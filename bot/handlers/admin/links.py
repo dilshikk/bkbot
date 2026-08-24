@@ -184,16 +184,24 @@ async def link_add_url(
     await repo.update_title(link.id, auto_title, message.from_user.id)
     link.title = auto_title
 
+    # Сразу активируем: деактивируем все остальные и активируем новую
+    await repo.activate(link.id, message.from_user.id)
+    link.is_active = True
+
     await log.log(
         ActionType.ADMIN_ACTION,
         telegram_id=message.from_user.id,
         meta={"action": "link_created", "link_id": link.id, "url": url},
     )
+    await log.log(
+        ActionType.LINK_SWITCHED,
+        telegram_id=message.from_user.id,
+        meta={"link_id": link.id, "action": "activated"},
+    )
     await state.clear()
     await message.answer(
-        f"✅ Зеркало <b>{link.title}</b> добавлено!\n"
-        f"ID: <code>{link.id}</code>\n\n"
-        f"Чтобы активировать — откройте его в списке.",
+        f"✅ Зеркало <b>{link.title}</b> добавлено и активировано!\n"
+        f"ID: <code>{link.id}</code>",
         parse_mode="HTML",
         reply_markup=admin_main_keyboard(),
     )
