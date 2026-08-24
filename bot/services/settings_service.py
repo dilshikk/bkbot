@@ -12,11 +12,7 @@ from bot.database.models import Settings
 class SettingsData:
     """
     Иммутабельный DTO настроек.
-
-    FIX: ранее возвращался модульный экземпляр Settings (ORM-объект без сессии).
-    Это приводило к DetachedInstanceError при обращении к lazy-атрибутам и
-    к общему изменяемому состоянию между запросами.
-    Теперь возвращается plain dataclass — безопасен вне сессии.
+    Возвращается из get_settings — безопасен вне сессии (нет DetachedInstanceError).
     """
     bot_enabled: bool
     maintenance: bool
@@ -25,6 +21,10 @@ class SettingsData:
     after_sub_text: str
     support_link: str | None
     version: str
+    # ── Приложение (APK) ──
+    app_enabled: bool
+    app_file_id: str | None
+    app_caption: str | None
 
 
 _DEFAULTS = SettingsData(
@@ -35,6 +35,9 @@ _DEFAULTS = SettingsData(
     after_sub_text="✅ Отлично! Теперь у вас есть доступ.",
     support_link=None,
     version="1.0.0",
+    app_enabled=False,
+    app_file_id=None,
+    app_caption=None,
 )
 
 
@@ -54,4 +57,7 @@ async def get_settings(session: AsyncSession) -> SettingsData:
         after_sub_text=row.after_sub_text,
         support_link=row.support_link,
         version=row.version,
+        app_enabled=row.app_enabled,
+        app_file_id=row.app_file_id,
+        app_caption=row.app_caption,
     )
