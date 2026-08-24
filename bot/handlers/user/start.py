@@ -48,8 +48,6 @@ async def cmd_start(
         meta={"source": payload},
     )
 
-    # Проверку maintenance убрали — она теперь в MaintenanceMiddleware
-    # и блокирует весь бот до того как запросы дойдут до хендлеров
     bot_settings = await get_settings(session)
 
     await message.answer(
@@ -108,7 +106,7 @@ async def on_check_subscription(
     bot_settings = await get_settings(session)
     await call.message.answer(
         bot_settings.after_sub_text,
-        reply_markup=main_menu_keyboard(),
+        reply_markup=await main_menu_keyboard(session),
     )
 
 
@@ -166,10 +164,10 @@ async def _handle_subscription_check(
     if not was_subscribed:
         await message.answer(
             bot_settings.after_sub_text,
-            reply_markup=main_menu_keyboard(),
+            reply_markup=await main_menu_keyboard(session),
         )
     else:
-        await message.answer("🏠 Главное меню", reply_markup=main_menu_keyboard())
+        await message.answer("🏠 Главное меню", reply_markup=await main_menu_keyboard(session))
 
 
 async def _confirm_subscription(
@@ -203,7 +201,7 @@ async def _confirm_subscription(
     bot_settings = await get_settings(session)
     await message.answer(
         bot_settings.after_sub_text,
-        reply_markup=main_menu_keyboard(),
+        reply_markup=await main_menu_keyboard(session),
     )
 
 
