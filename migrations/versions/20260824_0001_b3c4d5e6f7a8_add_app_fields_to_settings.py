@@ -1,4 +1,4 @@
-"""add app fields to settings
+"""add app fields to settings + bump version to 1.2.0
 
 Revision ID: b3c4d5e6f7a8
 Revises: a1b2c3d4e5f6
@@ -17,12 +17,15 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column('settings', sa.Column('app_enabled',  sa.Boolean(),      server_default='false', nullable=False))
-    op.add_column('settings', sa.Column('app_file_id',  sa.String(256),    nullable=True))
-    op.add_column('settings', sa.Column('app_caption',  sa.Text(),         nullable=True))
+    op.add_column('settings', sa.Column('app_enabled', sa.Boolean(),   server_default='false', nullable=False))
+    op.add_column('settings', sa.Column('app_file_id', sa.String(256), nullable=True))
+    op.add_column('settings', sa.Column('app_caption', sa.Text(),      nullable=True))
+    # Обновляем версию в существующей записи БД
+    op.execute("UPDATE settings SET version = '1.2.0'")
 
 
 def downgrade() -> None:
+    op.execute("UPDATE settings SET version = '1.0.0'")
     op.drop_column('settings', 'app_caption')
     op.drop_column('settings', 'app_file_id')
     op.drop_column('settings', 'app_enabled')
