@@ -1,17 +1,29 @@
-﻿from aiogram.types import (
+from aiogram.types import (
     InlineKeyboardButton, InlineKeyboardMarkup,
     ReplyKeyboardMarkup, KeyboardButton,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from bot.database.models import Channel
+from bot.database.models import Channel, Settings
 
 
-def main_menu_keyboard() -> ReplyKeyboardMarkup:
+async def main_menu_keyboard(session: AsyncSession) -> ReplyKeyboardMarkup:
+    """
+    Главное меню пользователя.
+    Кнопка «📱 Получить приложение» отображается только если app_enabled=True.
+    """
+    result = await session.execute(select(Settings).limit(1))
+    settings = result.scalar_one_or_none()
+    app_enabled = settings.app_enabled if settings else False
+
+    first_row = [KeyboardButton(text="🎯 Получить зеркало")]
+    if app_enabled:
+        first_row.append(KeyboardButton(text="📱 Получить приложение"))
+
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🎯 Получить зеркало")],
+            first_row,
             [KeyboardButton(text="📖 Как пользоваться"), KeyboardButton(text="🆘 Поддержка")],
             [KeyboardButton(text="ℹ️ О сервисе")],
         ],
