@@ -44,7 +44,6 @@ class LinkFlow(StatesGroup):
 # ── Вспомогательные функции ───────────────────────────────────
 
 def _is_valid_url(url: str) -> bool:
-    """Проверяет, что строка является корректным HTTP/HTTPS URL."""
     try:
         parsed = urlparse(url)
         return parsed.scheme in ("http", "https") and bool(parsed.netloc)
@@ -53,7 +52,6 @@ def _is_valid_url(url: str) -> bool:
 
 
 def _parse_dt(text: str) -> datetime | None:
-    """Парсит дату из строки. Возвращает None при ошибке."""
     try:
         return datetime.strptime(text.strip(), _DT_FMT)
     except ValueError:
@@ -61,7 +59,6 @@ def _parse_dt(text: str) -> datetime | None:
 
 
 def _now_naive() -> datetime:
-    """Текущее время без tzinfo (naive UTC) для сравнений с БД."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
@@ -173,18 +170,15 @@ async def link_add_url(
     repo = LinkRepository(session)
     log = LogRepository(session)
 
-    # Создаём ссылку с временным названием, после flush получаем ID
     link = await repo.create(
         title="_tmp",
         url=url,
         created_by=message.from_user.id,
     )
-    # Обновляем название на link_{id}
     auto_title = f"link_{link.id}"
     await repo.update_title(link.id, auto_title, message.from_user.id)
     link.title = auto_title
 
-    # Сразу активируем: деактивируем все остальные и активируем новую
     await repo.activate(link.id, message.from_user.id)
     link.is_active = True
 
@@ -376,7 +370,7 @@ async def link_schedule_start(call: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(link_id=link_id)
     await call.message.answer(
         "📅 Введите дату и время <b>начала</b> в формате:\n"
-        f"<code>{_DT_FMT.replace('%d', 'ДД').replace('%m', 'ММ').replace('%Y', 'ГГГГ').replace('%H', 'ЧЧ').replace('%M', 'ММ')}</code>\n\n"
+        f"<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n\n"
         f"Например: <code>{_DT_EXAMPLE}</code>",
         parse_mode="HTML",
         reply_markup=cancel_keyboard,
@@ -492,10 +486,43 @@ async def link_toggle_fallback(call: CallbackQuery, session: AsyncSession) -> No
     await call.answer("🛡 Резервная" if is_fallback else "Снято резервирование")
 
 
-# ── Удалить ───────────────────────────────────────────────────
+# ── Удалить — шаг 1: запросить подтверждение ─────────────────
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton  # noqa: E402
+
 
 @router.callback_query(F.data.startswith("link_delete:"), IsAdmin())
-async def link_delete(call: CallbackQuery, session: AsyncSession) -> None:
+async def link_delete_confirm(call: CallbackQuery, session: AsyncSession) -> None:
+    if call.message is None:
+        await call.answer()
+        return
+
+    link_id = int(call.data.split(":")[1])
+    link = await LinkRepository(session).get_by_id(link_id)
+    if link is None:
+        await call.answer("❌ Зеркало не найдено", show_alert=True)
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, удалить",  callback_data=f"link_delete_ok:{link_id}"),
+            InlineKeyboardButton(text="❌ Отмена",        callback_data=f"link_view:{link_id}"),
+        ]
+    ])
+    await call.message.edit_text(
+        f"🗑 Удалить зеркало <b>{link.title}</b>?\n\n"
+        f"URL: <code>{link.url}</code>\n\n"
+        f"Это действие нельзя отменить.",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    await call.answer()
+
+
+# ── Удалить — шаг 2: подтверждено ────────────────────────────
+
+@router.callback_query(F.data.startswith("link_delete_ok:"), IsAdmin())
+async def link_delete_ok(call: CallbackQuery, session: AsyncSession) -> None:
     if call.message is None:
         await call.answer()
         return
@@ -514,4 +541,4 @@ async def link_delete(call: CallbackQuery, session: AsyncSession) -> None:
         parse_mode="HTML",
         reply_markup=links_list_keyboard(links),
     )
-    await call.answer()
+    await call.answer("🗑 Удалено")
