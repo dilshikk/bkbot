@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 USER_COMMANDS: list[BotCommand] = [
     BotCommand(command="start", description="🚀 Запустить бота"),
+    BotCommand(command="menu",  description="🏠 Главное меню"),
     BotCommand(command="help",  description="❓ Помощь"),
 ]
 
@@ -88,8 +89,6 @@ async def _set_admin_commands(bot: Bot, admin_id: int) -> None:
         )
         logger.debug("commands: set ADMIN_COMMANDS for admin_id=%s", admin_id)
     except TelegramBadRequest as e:
-        # Telegram возвращает ошибку если юзер ещё не запускал бота
-        # (chat not found / user not found)
         logger.warning(
             "commands: could not set for admin_id=%s — %s "
             "(user may not have started the bot yet)",
@@ -104,7 +103,6 @@ async def _set_admin_commands(bot: Bot, admin_id: int) -> None:
 async def delete_default_commands(bot: Bot) -> None:
     """
     Сбрасывает все установленные команды при остановке бота.
-    Telegram покажет команды по умолчанию (или ничего).
     """
     for scope in (
         BotCommandScopeAllPrivateChats(),
@@ -128,8 +126,5 @@ async def delete_default_commands(bot: Bot) -> None:
 
 
 # ── Обратная совместимость ────────────────────────────────────
-# main.py вызывает set_commands / delete_commands — оставляем алиасы
-# чтобы не ломать существующий код до рефакторинга main.py
-
 set_commands = set_default_commands
 delete_commands = delete_default_commands
