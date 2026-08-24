@@ -25,6 +25,7 @@ class UserStatus(str, enum.Enum):
 class ActionType(str, enum.Enum):
     START          = "start"
     GET_MIRROR     = "get_mirror"
+    GET_APP        = "get_app"
     CHECK_SUB      = "check_sub"
     SUB_PASSED     = "sub_passed"
     SUB_FAILED     = "sub_failed"
@@ -90,20 +91,13 @@ class Link(Base, TimestampMixin):
     priority:    Mapped[int]  = mapped_column(Integer, default=0, server_default="0")
     is_active:   Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", index=True)
     is_healthy:  Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
-    # Планировщик — если заданы, переключаются автоматически
     active_from: Mapped[datetime | None] = mapped_column(DateTime)
     active_to:   Mapped[datetime | None] = mapped_column(DateTime)
-    # Статистика
     click_count: Mapped[int]  = mapped_column(Integer, default=0, server_default="0")
-    # Кто создал/изменил (telegram_id админа)
     created_by:  Mapped[int | None] = mapped_column(BigInteger)
     updated_by:  Mapped[int | None] = mapped_column(BigInteger)
-    # Резервная — используется если нет активной
     is_fallback: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    # Мягкое удаление
     is_deleted:  Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    # FIX: поле добавлено явно — ранее обращались через getattr() в mirror handler,
-    # что скрывало отсутствие поля в схеме и могло привести к ошибкам при миграциях
     photo_file_id: Mapped[str | None] = mapped_column(String(256))
 
     __table_args__ = (
@@ -145,6 +139,14 @@ class Settings(Base, TimestampMixin):
     version:           Mapped[str]  = mapped_column(String(32), default="1.0.0")
     updated_by:        Mapped[int | None] = mapped_column(BigInteger)
 
+    # ── Приложение (APK) ──────────────────────────────────────
+    # app_enabled: показывать ли кнопку "📱 Получить приложение" пользователям
+    # app_file_id: Telegram file_id загруженного APK-файла
+    # app_caption: текст/описание, которое бот отправляет вместе с файлом
+    app_enabled:  Mapped[bool]      = mapped_column(Boolean, default=False, server_default="false")
+    app_file_id:  Mapped[str | None] = mapped_column(String(256))
+    app_caption:  Mapped[str | None] = mapped_column(Text)
+
 
 # ─────────────────────────────────────────────
 # Broadcasts
@@ -156,7 +158,6 @@ class Broadcast(Base, TimestampMixin):
     id:            Mapped[int]  = mapped_column(Integer, primary_key=True, autoincrement=True)
     text:          Mapped[str | None] = mapped_column(Text)
     photo_file_id: Mapped[str | None] = mapped_column(String(256))
-    # Inline-кнопки: [{"text": "...", "url": "..."}]
     buttons:       Mapped[dict | None]  = mapped_column(JSON)
     status:        Mapped[str]  = mapped_column(String(16), default=BroadcastStatus.DRAFT)
     scheduled_at:  Mapped[datetime | None] = mapped_column(DateTime)
