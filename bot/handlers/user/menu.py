@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from aiogram import Router, F
 from aiogram.filters import Command
@@ -14,7 +14,6 @@ from bot.services.settings_service import get_settings
 
 router = Router(name="user.menu")
 
-# FIX: вынесено в константу — легко расширять без правки условия
 MENU_TRIGGERS: frozenset[str] = frozenset({
     "🏠 Главное меню",
     "◀️ Назад",
@@ -24,12 +23,10 @@ MENU_TRIGGERS: frozenset[str] = frozenset({
 # ── Главное меню ──────────────────────────────────────────────
 
 @router.message(F.text.in_(MENU_TRIGGERS))
-async def show_main_menu(message: Message) -> None:
-    # FIX: убран неиспользуемый параметр db_user (не нужен здесь)
-    # FIX: убран лишний f"..." — не содержал интерполяции
+async def show_main_menu(message: Message, session: AsyncSession) -> None:
     await message.answer(
         "Выберите действие:",
-        reply_markup=main_menu_keyboard(),
+        reply_markup=await main_menu_keyboard(session),
     )
 
 
@@ -69,8 +66,6 @@ async def about(message: Message, session: AsyncSession) -> None:
 async def support(message: Message, session: AsyncSession) -> None:
     settings = await get_settings(session)
 
-    # FIX: импорт InlineKeyboardMarkup/Button перенесён на верхний уровень —
-    # lazy import внутри функции скрывает зависимость и замедляет первый вызов
     if settings.support_link:
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(
