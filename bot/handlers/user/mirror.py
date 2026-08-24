@@ -67,10 +67,10 @@ async def _send_mirror(
             meta={"result": "no_active_link"},
         )
         return
-
     text = (
         "🎯 <b>Актуальное рабочее зеркало</b>\n\n"
-        f"<code>{link.url}</code>"
+        f"<code>{link.url}</code>\n\n"
+        "🤖 <b>Отправлено ботом:</b> @xBet_1xbot"
     )
     kb = _build_keyboard(link.url)
 
@@ -204,7 +204,7 @@ def _build_keyboard(url: str) -> InlineKeyboardMarkup:
     share_url = (
         "https://t.me/share/url"
         f"?url={quote(url)}"
-        f"&text={quote('🎯 Актуальное рабочее зеркало')}"
+        f"&text={quote('🎯 Актуальное рабочее зеркало @xBet_1xbot')}"
     )
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Перейти", url=url)],
