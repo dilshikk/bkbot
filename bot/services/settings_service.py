@@ -25,6 +25,8 @@ class SettingsData:
     app_enabled: bool
     app_file_id: str | None
     app_caption: str | None
+    app_download_count: int
+    app_file_name: str | None
 
 
 _DEFAULTS = SettingsData(
@@ -38,6 +40,8 @@ _DEFAULTS = SettingsData(
     app_enabled=False,
     app_file_id=None,
     app_caption=None,
+    app_download_count=0,
+    app_file_name=None,
 )
 
 
@@ -60,4 +64,6 @@ async def get_settings(session: AsyncSession) -> SettingsData:
         app_enabled=row.app_enabled,
         app_file_id=row.app_file_id,
         app_caption=row.app_caption,
+        app_download_count=row.app_download_count,
+        app_file_name=row.app_file_name,
     )
