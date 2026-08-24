@@ -1,4 +1,4 @@
-﻿# bot/handlers/admin/settings.py
+# bot/handlers/admin/settings.py
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.filters.admin import IsAdmin
 from bot.keyboards.admin import admin_main_keyboard, cancel_keyboard
 from bot.database.models import Settings
-from bot.services.settings_service import get_settings
+from bot.services.settings_service import get_settings, SettingsData
 
 router = Router(name="admin.settings")
 
@@ -21,11 +21,16 @@ class SettingsFlow(StatesGroup):
     edit_support          = State()
 
 
-def settings_keyboard(s: Settings) -> InlineKeyboardMarkup:
+def settings_keyboard(s: SettingsData) -> InlineKeyboardMarkup:
+    app_toggle_text = "🔴 Скрыть кнопку приложения" if s.app_enabled else "🟢 Показать кнопку приложения"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="🔧 Выключить техработы" if s.maintenance else "🔧 Включить техработы",
             callback_data="settings_toggle_maintenance",
+        )],
+        [InlineKeyboardButton(
+            text=app_toggle_text,
+            callback_data="settings_toggle_app",
         )],
         [InlineKeyboardButton(text="✏️ Текст приветствия",    callback_data="settings_edit_welcome")],
         [InlineKeyboardButton(text="✏️ Текст после подписки", callback_data="settings_edit_after_sub")],
@@ -39,10 +44,12 @@ def settings_keyboard(s: Settings) -> InlineKeyboardMarkup:
 @router.message(F.text == "⚙️ Настройки", IsAdmin())
 async def show_settings(message: Message, session: AsyncSession) -> None:
     s = await get_settings(session)
+    app_btn = "🟢 Видна пользователям" if s.app_enabled else "⚪️ Скрыта"
     text = (
         f"⚙️ <b>Настройки</b>\n\n"
         f"Бот: {'✅ Работает' if s.bot_enabled else '🔴 Выключен'}\n"
         f"Техработы: {'🔧 Да' if s.maintenance else '✅ Нет'}\n"
+        f"Кнопка приложения: {app_btn}\n"
         f"Поддержка: {s.support_link or '—'}\n\n"
         f"<b>Приветствие:</b>\n{s.welcome_text}\n\n"
         f"<b>После подписки:</b>\n{s.after_sub_text}"
@@ -58,8 +65,23 @@ async def toggle_maintenance(call: CallbackQuery, session: AsyncSession) -> None
     s.maintenance = not s.maintenance
     s.updated_by  = call.from_user.id
     await session.flush()
-    await call.message.edit_reply_markup(reply_markup=settings_keyboard(s))
+    updated = await get_settings(session)
+    await call.message.edit_reply_markup(reply_markup=settings_keyboard(updated))
     await call.answer("🔧 Включены" if s.maintenance else "✅ Выключены")
+
+
+# ── Кнопка приложения ─────────────────────────────────────────
+
+@router.callback_query(F.data == "settings_toggle_app", IsAdmin())
+async def toggle_app(call: CallbackQuery, session: AsyncSession) -> None:
+    s             = await _get_or_create(session)
+    s.app_enabled = not s.app_enabled
+    s.updated_by  = call.from_user.id
+    await session.flush()
+    updated = await get_settings(session)
+    await call.message.edit_reply_markup(reply_markup=settings_keyboard(updated))
+    status = "🟢 Кнопка показана пользователям" if s.app_enabled else "⚪️ Кнопка скрыта"
+    await call.answer(status)
 
 
 # ── Текст приветствия ─────────────────────────────────────────
