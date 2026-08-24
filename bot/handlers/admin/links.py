@@ -1,4 +1,4 @@
-﻿# bot/handlers/admin/links.py
+# bot/handlers/admin/links.py
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -34,7 +34,6 @@ _DT_EXAMPLE = "25.07.2026 09:00"
 # ── FSM ───────────────────────────────────────────────────────
 
 class LinkFlow(StatesGroup):
-    add_title     = State()
     add_url       = State()
     edit_url      = State()
     edit_title    = State()
@@ -63,7 +62,7 @@ def _parse_dt(text: str) -> datetime | None:
 
 def _now_naive() -> datetime:
     """Текущее время без tzinfo (naive UTC) для сравнений с БД."""
-    return datetime.utcnow()
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # ── Список ────────────────────────────────────────────────────
@@ -145,30 +144,12 @@ async def link_add_start(call: CallbackQuery, state: FSMContext) -> None:
 
     await state.clear()
     await call.message.answer(
-        "✏️ Введите <b>название</b> нового зеркала:",
-        parse_mode="HTML",
-        reply_markup=cancel_keyboard,
-    )
-    await state.set_state(LinkFlow.add_title)
-    await call.answer()
-
-
-@router.message(LinkFlow.add_title, IsAdmin())
-async def link_add_title(message: Message, state: FSMContext) -> None:
-    title = (message.text or "").strip()
-    if not (_TITLE_MIN <= len(title) <= _TITLE_MAX):
-        await message.answer(
-            f"❌ Название: {_TITLE_MIN}–{_TITLE_MAX} символов.",
-            reply_markup=cancel_keyboard,
-        )
-        return
-    await state.update_data(title=title)
-    await message.answer(
         "🔗 Введите <b>URL</b> зеркала (https://...):",
         parse_mode="HTML",
         reply_markup=cancel_keyboard,
     )
     await state.set_state(LinkFlow.add_url)
+    await call.answer()
 
 
 @router.message(LinkFlow.add_url, IsAdmin())
@@ -177,7 +158,6 @@ async def link_add_url(
     state: FSMContext,
     session: AsyncSession,
 ) -> None:
-    # FIX: была слабая проверка startswith("http"), теперь полная валидация URL
     url = (message.text or "").strip()
     if not _is_valid_url(url):
         await message.answer(
@@ -186,30 +166,24 @@ async def link_add_url(
         )
         return
 
-    # FIX: защита от None в from_user
     if message.from_user is None:
         await state.clear()
-        return
-
-    data = await state.get_data()
-    title: str | None = data.get("title")
-
-    if title is None:
-        await state.clear()
-        await message.answer(
-            "❌ Данные сценария устарели. Начните добавление заново.",
-            reply_markup=admin_main_keyboard(),
-        )
         return
 
     repo = LinkRepository(session)
     log = LogRepository(session)
 
+    # Создаём ссылку с временным названием, после flush получаем ID
     link = await repo.create(
-        title=title,
+        title="_tmp",
         url=url,
         created_by=message.from_user.id,
     )
+    # Обновляем название на link_{id}
+    auto_title = f"link_{link.id}"
+    await repo.update_title(link.id, auto_title, message.from_user.id)
+    link.title = auto_title
+
     await log.log(
         ActionType.ADMIN_ACTION,
         telegram_id=message.from_user.id,
@@ -248,7 +222,6 @@ async def link_activate(call: CallbackQuery, session: AsyncSession) -> None:
 
 @router.callback_query(F.data.startswith("link_deact:"), IsAdmin())
 async def link_deact(call: CallbackQuery, session: AsyncSession) -> None:
-    # FIX: добавлено логирование (было только в activate, не в deact)
     if call.message is None:
         await call.answer()
         return
@@ -291,7 +264,6 @@ async def link_edit_url_done(
     state: FSMContext,
     session: AsyncSession,
 ) -> None:
-    # FIX: та же слабая валидация, заменена на _is_valid_url
     url = (message.text or "").strip()
     if not _is_valid_url(url):
         await message.answer(
@@ -300,7 +272,6 @@ async def link_edit_url_done(
         )
         return
 
-    # FIX: защита from_user
     if message.from_user is None:
         await state.clear()
         return
@@ -317,7 +288,6 @@ async def link_edit_url_done(
         return
 
     await LinkRepository(session).update_url(link_id, url, message.from_user.id)
-    # FIX: добавлено логирование (раньше отсутствовало)
     await LogRepository(session).log(
         ActionType.ADMIN_ACTION,
         telegram_id=message.from_user.id,
@@ -360,7 +330,6 @@ async def link_edit_title_done(
         )
         return
 
-    # FIX: защита from_user
     if message.from_user is None:
         await state.clear()
         return
@@ -377,7 +346,6 @@ async def link_edit_title_done(
         return
 
     await LinkRepository(session).update_title(link_id, title, message.from_user.id)
-    # FIX: добавлено логирование (раньше отсутствовало)
     await LogRepository(session).log(
         ActionType.ADMIN_ACTION,
         telegram_id=message.from_user.id,
@@ -420,7 +388,6 @@ async def link_schedule_from(message: Message, state: FSMContext) -> None:
         )
         return
 
-    # FIX: дата начала не должна быть в прошлом
     if dt < _now_naive():
         await message.answer(
             "❌ Дата начала не может быть в прошлом.",
@@ -443,7 +410,6 @@ async def link_schedule_to(
     state: FSMContext,
     session: AsyncSession,
 ) -> None:
-    # FIX: защита from_user
     if message.from_user is None:
         await state.clear()
         return
@@ -473,7 +439,6 @@ async def link_schedule_to(
         )
         return
 
-    # FIX: дата окончания должна быть позже даты начала
     if active_to is not None and active_to <= active_from:
         await message.answer(
             "❌ Дата окончания должна быть позже даты начала.",
@@ -529,13 +494,11 @@ async def link_delete(call: CallbackQuery, session: AsyncSession) -> None:
 
     link_id = int(call.data.split(":")[1])
     await LinkRepository(session).soft_delete(link_id, call.from_user.id)
-    # FIX: добавлено логирование удаления (ранее отсутствовало)
     await LogRepository(session).log(
         ActionType.ADMIN_ACTION,
         telegram_id=call.from_user.id,
         meta={"action": "link_deleted", "link_id": link_id},
     )
-    # FIX: добавлена навигация обратно к списку (пользователь не "застревал")
     repo = LinkRepository(session)
     links = await repo.get_all()
     await call.message.edit_text(
