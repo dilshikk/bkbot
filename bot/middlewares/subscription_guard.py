@@ -13,15 +13,16 @@ from bot.repositories.user_repo import UserRepository
 from bot.services.subscription_service import check_all_subscriptions
 from bot.keyboards.user import subscription_keyboard
 
-# Тексты/команды которые всегда пропускаем без проверки подписки
-_PASS_THROUGH_TEXTS: frozenset[str] = frozenset({"/start"})
+# Тексты которые всегда пропускаем без проверки подписки.
+# /start (с любой меткой источника) обрабатывается отдельно через startswith.
+_PASS_THROUGH_TEXTS: frozenset[str] = frozenset({"🔄 Проверить подписку"})
 # Callback data которые пропускаем (кнопка "Проверить подписку")
 _PASS_THROUGH_CALLBACKS: frozenset[str] = frozenset({"check_subscription"})
 
 
 class SubscriptionGuardMiddleware(BaseMiddleware):
     """
-    Перехватывает каждый апдейт.
+    Регистрируется на dp.message и dp.callback_query (НЕ на dp.update).
     Если пользователь отписался — показывает экран подписки.
     Администраторы (settings.ADMIN_IDS) полностью освобождены от проверки.
     """
@@ -32,12 +33,10 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        # Администраторы — пропускаем без проверки подписки
         user_id = _extract_user_id(event)
         if user_id in settings.ADMIN_IDS:
             return await handler(event, data)
 
-        # Обрабатываем только Message и CallbackQuery
         if isinstance(event, Message):
             return await self._handle_message(handler, event, data)
         if isinstance(event, CallbackQuery):
@@ -51,7 +50,8 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         text = event.text or ""
-        if text in _PASS_THROUGH_TEXTS:
+        # /start пропускаем с любой меткой: "/start", "/start ref123"
+        if text.startswith("/start") or text in _PASS_THROUGH_TEXTS:
             return await handler(event, data)
 
         if not await self._is_subscribed(event, data):
@@ -64,7 +64,6 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
         event: CallbackQuery,
         data: dict[str, Any],
     ) -> Any:
-        # Кнопку "check_subscription" всегда пропускаем
         if (event.data or "") in _PASS_THROUGH_CALLBACKS:
             return await handler(event, data)
 
@@ -106,13 +105,5 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
 
 
 def _extract_user_id(event: TelegramObject) -> int:
-    """Извлекает telegram_id пользователя из любого типа апдейта."""
     from_user = getattr(event, "from_user", None)
-    if from_user is not None:
-        return from_user.id
-    # Update-level апдейты
-    if hasattr(event, "message") and event.message and event.message.from_user:
-        return event.message.from_user.id
-    if hasattr(event, "callback_query") and event.callback_query and event.callback_query.from_user:
-        return event.callback_query.from_user.id
-    return 0
+    return from_user.id if from_user is not None else 0

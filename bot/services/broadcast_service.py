@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import enum
 import logging
 from datetime import datetime, timezone
 
@@ -17,7 +18,7 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
 )
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.core.background_tasks import create_background_task
@@ -30,6 +31,14 @@ _BATCH_SIZE = 30    # сообщений за одну итерацию
 _SEND_DELAY = 0.05  # секунд между отправками
 # Проверяем статус рассылки раз в N пользователей, а не каждый раз
 _CANCEL_CHECK_INTERVAL = 50
+# Максимум попыток при 429 Too Many Requests
+_MAX_RETRIES = 3
+
+
+class SendResult(enum.Enum):
+    OK = "ok"
+    BLOCKED = "blocked"   # пользователь заблокировал бота
+    FAILED = "failed"
 
 
 def _utcnow() -> datetime:
@@ -81,7 +90,6 @@ class BroadcastService:
         ) or 0
 
         broadcast.status = BroadcastStatus.RUNNING
-        # FIX: заменён deprecated datetime.utcnow()
         broadcast.started_at = _utcnow()
         broadcast.total = total
         await self._s.commit()
@@ -108,72 +116,74 @@ async def run_broadcast_task(
     broadcast_id: int,
 ) -> None:
     """
-    Выполняется вне основного запроса.
-    Использует собственную сессию БД.
+    Выполняется вне основного запроса. Использует собственную сессию БД.
+
+    FIX: выборка по последнему id (keyset) вместо OFFSET — список не «съезжает»,
+    если кто-то выбыл из активных во время рассылки.
+    FIX: заблокировавшие бота помечаются status=DELETED и больше не получают рассылки.
     """
     async with session_factory() as session:
         broadcast = await session.get(Broadcast, broadcast_id)
         if broadcast is None:
             logger.error("broadcast_id=%s not found", broadcast_id)
             return
-
         if broadcast.status != BroadcastStatus.RUNNING:
             return
 
         kb = _build_keyboard(broadcast.buttons)
-        offset = 0
+        last_id = 0
         sent = failed = processed = 0
+        blocked_ids: list[int] = []
+
+        async def save_progress() -> None:
+            if blocked_ids:
+                await session.execute(
+                    update(User)
+                    .where(User.id.in_(blocked_ids))
+                    .values(status=UserStatus.DELETED)
+                )
+                blocked_ids.clear()
+            broadcast.sent = sent
+            broadcast.failed = failed
+            await session.commit()
 
         try:
             while True:
-                # Получаем батч активных пользователей
-                result = await session.execute(
-                    select(User.telegram_id)
-                    .where(User.status == UserStatus.ACTIVE)
+                rows = (await session.execute(
+                    select(User.id, User.telegram_id)
+                    .where(User.status == UserStatus.ACTIVE, User.id > last_id)
                     .order_by(User.id)
-                    .offset(offset)
                     .limit(_BATCH_SIZE)
-                )
-                batch = list(result.scalars().all())
-                if not batch:
+                )).all()
+                if not rows:
                     break
+                last_id = rows[-1].id
 
-                for telegram_id in batch:
-                    # FIX: проверяем отмену раз в N пользователей, а не каждый раз.
-                    # Ранее session.refresh(broadcast) вызывался для КАЖДОГО
-                    # пользователя — при 10к юзеров это 10к лишних запросов к БД.
+                for row in rows:
                     processed += 1
                     if processed % _CANCEL_CHECK_INTERVAL == 0:
                         await session.refresh(broadcast)
                         if broadcast.status == BroadcastStatus.CANCELLED:
-                            broadcast.sent = sent
-                            broadcast.failed = failed
-                            await session.commit()
+                            await save_progress()
                             logger.info("broadcast_id=%s cancelled mid-flight", broadcast_id)
                             return
 
-                    success = await _send_one(bot, telegram_id, broadcast, kb)
-                    if success:
+                    result = await _send_one(bot, row.telegram_id, broadcast, kb)
+                    if result is SendResult.OK:
                         sent += 1
                     else:
                         failed += 1
+                        if result is SendResult.BLOCKED:
+                            blocked_ids.append(row.id)
 
                     await asyncio.sleep(_SEND_DELAY)
 
-                # Обновляем прогресс после каждого батча
-                broadcast.sent = sent
-                broadcast.failed = failed
-                await session.commit()
+                # Прогресс сохраняем после каждого батча
+                await save_progress()
 
-                offset += _BATCH_SIZE
-
-            # Завершено
             broadcast.status = BroadcastStatus.DONE
-            # FIX: заменён deprecated datetime.utcnow()
             broadcast.finished_at = _utcnow()
-            broadcast.sent = sent
-            broadcast.failed = failed
-            await session.commit()
+            await save_progress()
 
             logger.info(
                 "broadcast_id=%s done | sent=%s failed=%s",
@@ -182,6 +192,7 @@ async def run_broadcast_task(
 
         except Exception:
             logger.exception("broadcast_id=%s crashed", broadcast_id)
+            await session.rollback()
             broadcast.status = BroadcastStatus.FAILED
             await session.commit()
 
@@ -193,7 +204,8 @@ async def _send_one(
     telegram_id: int,
     broadcast: Broadcast,
     kb: InlineKeyboardMarkup | None,
-) -> bool:
+    attempt: int = 1,
+) -> SendResult:
     try:
         if broadcast.photo_file_id:
             await bot.send_photo(
@@ -209,26 +221,27 @@ async def _send_one(
                 text=broadcast.text,
                 parse_mode="HTML",
                 reply_markup=kb,
-                # FIX: disable_web_page_preview deprecated в aiogram 3.x
                 link_preview_options={"is_disabled": True},
             )
-        return True
+        return SendResult.OK
 
     except TelegramRetryAfter as e:
-        # FIX: обработка 429 Too Many Requests — ждём и повторяем
-        logger.warning("rate limited, sleeping %ss", e.retry_after)
-        await asyncio.sleep(e.retry_after)
-        return await _send_one(bot, telegram_id, broadcast, kb)
+        # FIX: ограничиваем число повторов — раньше рекурсия была бесконечной
+        if attempt >= _MAX_RETRIES:
+            logger.error("telegram_id=%s: retry limit reached", telegram_id)
+            return SendResult.FAILED
+        logger.warning("rate limited, sleeping %ss (attempt %s)", e.retry_after, attempt)
+        await asyncio.sleep(e.retry_after + 1)
+        return await _send_one(bot, telegram_id, broadcast, kb, attempt=attempt + 1)
 
     except TelegramForbiddenError:
-        # Пользователь заблокировал бота — не спамим в лог
-        return False
+        return SendResult.BLOCKED
     except TelegramBadRequest as e:
         logger.warning("send failed telegram_id=%s: %s", telegram_id, e)
-        return False
+        return SendResult.FAILED
     except Exception as e:
         logger.error("send error telegram_id=%s: %s", telegram_id, e)
-        return False
+        return SendResult.FAILED
 
 
 def _build_keyboard(

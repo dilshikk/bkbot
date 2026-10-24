@@ -52,7 +52,11 @@ async def main() -> None:
     dp.message.outer_middleware(BanCheckMiddleware())
     dp.message.outer_middleware(ThrottleMiddleware())
 
-    dp.update.outer_middleware(SubscriptionGuardMiddleware())
+    # FIX: guard ждёт Message/CallbackQuery, а на уровне dp.update получал Update
+    # и пропускал всех без проверки. Регистрируем на нужных типах событий.
+    subscription_guard = SubscriptionGuardMiddleware()
+    dp.message.outer_middleware(subscription_guard)
+    dp.callback_query.outer_middleware(subscription_guard)
 
     # ── Routers ──────────────────────────────────────────────
     dp.include_router(admin_router)

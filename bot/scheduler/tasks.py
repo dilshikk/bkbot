@@ -1,4 +1,4 @@
-﻿"""
+"""
 Все периодические задачи бота.
 
 Запускаются через APScheduler при старте в main.py.
@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import aiohttp
 from aiogram import Bot
@@ -17,15 +17,33 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.core.config import settings
 from bot.core.background_tasks import create_background_task
-from bot.database.models import Link, Broadcast, BroadcastStatus, User, UserStatus
+from bot.core.redis_client import get_redis
+from bot.database.models import (
+    ActionLog, ActionType, Broadcast, BroadcastStatus, Link, User, UserStatus,
+)
 
 logger = logging.getLogger(__name__)
 
 # Таймаут HTTP-пинга зеркала
 _PING_TIMEOUT = aiohttp.ClientTimeout(total=8, connect=4)
 
-# Коды которые считаем "живыми"
-_HEALTHY_CODES = frozenset(range(200, 500))  # всё кроме 5xx и сетевых ошибок
+# 2xx/3xx — сайт работает. 403 оставлен рабочим: защита Cloudflare часто
+# отвечает так ботам при живом сайте. Если ваши заблокированные зеркала
+# отвечают именно 403 — уберите его из набора.
+_EXTRA_OK_CODES = frozenset({403})
+# Зеркало считается упавшим только после N неудачных проверок подряд
+_FAILS_BEFORE_DOWN = 2
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    )
+}
+
+
+def _utcnow() -> datetime:
+    """Текущее UTC время без tzinfo (naive) для совместимости с БД."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # ────────────────────────────────────────────────────────
@@ -39,76 +57,76 @@ async def switch_scheduled_links(
     """
     Запускается каждые 5 минут.
 
-    Логика:
-    1. Активируем ссылки у которых наступило active_from
-    2. Деактивируем ссылки у которых истекло active_to
-    3. Уведомляем админов если что-то переключилось
+    1. Активируем ссылки, у которых наступило active_from и расписание
+       ещё не применялось (schedule_applied=False).
+    2. Деактивируем ссылки, у которых истекло active_to.
+    3. Уведомляем админов — только после успешного commit.
+
+    FIX: раньше выборка шла по is_active=False — после включения лучшей ссылки
+    на следующем запуске включалась следующая, и зеркала крутились по кругу.
     """
+    notifications: list[str] = []
+
     async with session_factory() as session:
         try:
-            now = datetime.utcnow()
+            now = _utcnow()
 
-            # Ссылки которые надо активировать
-            to_activate_result = await session.execute(
+            to_activate = list((await session.scalars(
                 select(Link).where(
                     Link.active_from <= now,
-                    Link.is_active == False,
+                    Link.schedule_applied == False,
                     Link.is_deleted == False,
-                    # active_to ещё не наступило (или не задано)
                     (Link.active_to > now) | (Link.active_to.is_(None)),
                 )
-            )
-            to_activate = list(to_activate_result.scalars().all())
+            )).all())
 
-            # Ссылки у которых истёк срок
-            to_deactivate_result = await session.execute(
+            to_deactivate = list((await session.scalars(
                 select(Link).where(
                     Link.active_to <= now,
                     Link.is_active == True,
                     Link.is_deleted == False,
                 )
-            )
-            to_deactivate = list(to_deactivate_result.scalars().all())
+            )).all())
 
             if not to_activate and not to_deactivate:
                 return
 
-            # Сначала деактивируем истёкшие
             for link in to_deactivate:
                 link.is_active = False
                 logger.info("scheduler: deactivated link_id=%s '%s' (expired)", link.id, link.title)
 
-            # Активируем запланированные — деактивируем все остальные
             if to_activate:
+                best = max(to_activate, key=lambda l: l.priority)
                 await session.execute(
                     update(Link)
-                    .where(Link.is_deleted == False)
+                    .where(Link.is_deleted == False, Link.id != best.id)
                     .values(is_active=False)
                 )
-                # Активируем с наибольшим приоритетом из запланированных
-                best = max(to_activate, key=lambda l: l.priority)
                 best.is_active = True
+                # Помечаем ВСЕ кандидаты, иначе через 5 минут включится следующий
+                for link in to_activate:
+                    link.schedule_applied = True
                 logger.info("scheduler: activated link_id=%s '%s'", best.id, best.title)
 
-                await _notify_admins(
-                    bot,
+                notifications.append(
                     f"🔄 <b>Автопереключение зеркала</b>\n\n"
                     f"Активировано: <b>{best.title}</b>\n"
-                    f"URL: <code>{best.url}</code>",
+                    f"URL: <code>{best.url}</code>"
                 )
 
             if to_deactivate:
                 titles = ", ".join(l.title for l in to_deactivate)
-                await _notify_admins(
-                    bot,
-                    f"⏳ <b>Срок зеркал истёк</b>\n\nДеактивированы: {titles}",
-                )
+                notifications.append(f"⏳ <b>Срок зеркал истёк</b>\n\nДеактивированы: {titles}")
 
             await session.commit()
 
         except Exception:
             logger.exception("scheduler: switch_scheduled_links failed")
             await session.rollback()
+            return
+
+    for text in notifications:
+        await _notify_admins(bot, text)
 
 
 # ────────────────────────────────────────────────────────
@@ -122,7 +140,7 @@ async def health_check_links(
     """
     Запускается каждые 10 минут.
 
-    Пиингует каждое не удалённое зеркало.
+    Пингует каждое не удалённое зеркало.
     Если статус is_healthy изменился — обновляет БД и уведомляет админов.
     """
     async with session_factory() as session:
@@ -138,7 +156,8 @@ async def health_check_links(
             results = await _ping_all(links)
 
             changed: list[tuple[Link, bool]] = []
-            for link, is_healthy in results:
+            for link, raw_ok in results:
+                is_healthy = await _with_fail_threshold(link, raw_ok)
                 if link.is_healthy != is_healthy:
                     changed.append((link, is_healthy))
                     link.is_healthy = is_healthy
@@ -147,7 +166,6 @@ async def health_check_links(
                 await session.commit()
                 await _notify_health_changes(bot, changed)
             else:
-                # Нет изменений — роллбэчим пустую транзакцию
                 await session.rollback()
 
         except Exception:
@@ -156,21 +174,44 @@ async def health_check_links(
 
 
 async def _ping_all(links: list[Link]) -> list[tuple[Link, bool]]:
-    """Пиингуем все ссылки параллельно."""
+    """Пингуем все ссылки параллельно."""
     async with aiohttp.ClientSession(timeout=_PING_TIMEOUT) as http:
         tasks = [_ping_one(http, link) for link in links]
         return await asyncio.gather(*tasks)
 
 
+def _status_ok(code: int) -> bool:
+    return 200 <= code < 400 or code in _EXTRA_OK_CODES
+
+
 async def _ping_one(http: aiohttp.ClientSession, link: Link) -> tuple[Link, bool]:
     try:
-        async with http.get(link.url, allow_redirects=True) as resp:
-            healthy = resp.status in _HEALTHY_CODES
+        async with http.get(
+            link.url,
+            allow_redirects=True,
+            headers=_HEADERS,
+            # Прокси в нужной стране — проверка «глазами» пользователя
+            proxy=settings.HEALTHCHECK_PROXY or None,
+        ) as resp:
+            healthy = _status_ok(resp.status)
             logger.debug("ping link_id=%s status=%s healthy=%s", link.id, resp.status, healthy)
             return link, healthy
     except Exception as e:
         logger.debug("ping link_id=%s error=%s", link.id, e)
         return link, False
+
+
+async def _with_fail_threshold(link: Link, ok: bool) -> bool:
+    """Зеркало «падает» только после _FAILS_BEFORE_DOWN неудач подряд."""
+    redis = await get_redis()
+    key = f"health:fails:{link.id}"
+    if ok:
+        await redis.delete(key)
+        return True
+    fails = await redis.incr(key)
+    await redis.expire(key, 3600)
+    # Пока порог не достигнут — оставляем текущее состояние
+    return link.is_healthy if fails < _FAILS_BEFORE_DOWN else False
 
 
 async def _notify_health_changes(
@@ -195,7 +236,7 @@ async def _notify_health_changes(
 
 
 # ────────────────────────────────────────────────────────
-# Task 3 — Дейли статистика (опционально)
+# Task 3 — Дейли статистика
 # ────────────────────────────────────────────────────────
 
 async def daily_stats(
@@ -206,13 +247,9 @@ async def daily_stats(
     Запускается каждый день в 09:00 UTC.
     Отправляет краткую статистику за вчера всем админам.
     """
-    from sqlalchemy import func
-    from bot.database.models import User, ActionLog, ActionType
-    from datetime import timedelta
-
     async with session_factory() as session:
         try:
-            today     = datetime.utcnow().date()
+            today     = _utcnow().date()
             yesterday = today - timedelta(days=1)
 
             new_users = await session.scalar(
@@ -237,6 +274,7 @@ async def daily_stats(
         except Exception:
             logger.exception("scheduler: daily_stats failed")
 
+
 # ────────────────────────────────────────────────────────
 # Task 4 — запуск отложенных рассылок
 # ────────────────────────────────────────────────────────
@@ -247,15 +285,12 @@ async def run_pending_broadcasts(
 ) -> None:
     """
     Каждую минуту проверяем запланированные рассылки.
-    Запускаем те у которых наступило scheduled_at.
+    Запускаем те, у которых наступило scheduled_at.
     """
     from bot.services.broadcast_service import run_broadcast_task
     async with session_factory() as session:
         try:
-            now = datetime.utcnow()
-            total = await session.scalar(
-                select(func.count(User.id)).where(User.status == UserStatus.ACTIVE)
-            ) or 0
+            now = _utcnow()
 
             result = await session.execute(
                 update(Broadcast)
@@ -263,15 +298,24 @@ async def run_pending_broadcasts(
                     Broadcast.status == BroadcastStatus.PENDING,
                     Broadcast.scheduled_at <= now,
                 )
-                .values(
-                    status=BroadcastStatus.RUNNING,
-                    started_at=now,
-                    total=total,
-                )
+                .values(status=BroadcastStatus.RUNNING, started_at=now)
                 .returning(Broadcast.id)
             )
             broadcast_ids = list(result.scalars().all())
 
+            if not broadcast_ids:
+                await session.rollback()
+                return
+
+            # Считаем получателей только если есть что запускать
+            total = await session.scalar(
+                select(func.count(User.id)).where(User.status == UserStatus.ACTIVE)
+            ) or 0
+            await session.execute(
+                update(Broadcast)
+                .where(Broadcast.id.in_(broadcast_ids))
+                .values(total=total)
+            )
             await session.commit()
 
             for broadcast_id in broadcast_ids:
@@ -284,6 +328,7 @@ async def run_pending_broadcasts(
         except Exception:
             logger.exception("run_pending_broadcasts failed")
             await session.rollback()
+
 
 # ────────────────────────────────────────────────────────
 # Helpers
