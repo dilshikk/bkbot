@@ -9,11 +9,17 @@ class Settings(BaseSettings):
     GROUP_ID:            int = 0
     MODERATION_ENABLED:  bool = False
 
+    # Уведомлять админов о каждом новом пользователе
+    NOTIFY_NEW_USERS:    bool = False
+
     # Антиспам
-    THROTTLE_RATE:       int = 1      # макс. сообщений
+    THROTTLE_RATE:       int = 3      # макс. сообщений
     THROTTLE_PERIOD:     int = 2      # за N секунд
     THROTTLE_BAN_COUNT:  int = 20     # после N нарушений — временный бан
     THROTTLE_BAN_TTL:    int = 300    # на 5 минут
+
+    # Прокси для проверки зеркал (например http://user:pass@host:port)
+    HEALTHCHECK_PROXY:   str | None = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -2,10 +2,10 @@
 Антиспам на Redis.
 
 Алгоритм — sliding window (скользящее окно):
-  - Храним список меток времени в Redis sorted set
+  - Храним метки времени в Redis sorted set
   - При каждом сообщении удаляем старые метки (вне окна)
   - Считаем оставшиеся
-  - Если count >= THROTTLE_RATE → нарушение
+  - Если count > THROTTLE_RATE → нарушение
 
 При превышении THROTTLE_BAN_COUNT нарушений подряд
 пользователь получает временный бан на THROTTLE_BAN_TTL секунд.
@@ -31,12 +31,6 @@ _KEY_BANNED = "throttle:banned:{user_id}"
 
 
 class ThrottleMiddleware(BaseMiddleware):
-    """
-    Redis sliding-window антиспам.
-    Работает корректно при нескольких инстансах бота.
-    Администраторы пропускаются без проверки.
-    """
-
     async def __call__(
         self,
         handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
@@ -48,17 +42,14 @@ class ThrottleMiddleware(BaseMiddleware):
 
         user_id = event.from_user.id
 
-        # Всегда пропускаем /start
         if (event.text or "").startswith("/start"):
             return await handler(event, data)
 
-        # Администраторы освобождены от всех throttle-ограничений
         if user_id in settings.ADMIN_IDS:
             return await handler(event, data)
 
         redis = await get_redis()
 
-        # Проверяем временный бан
         if await _is_banned(redis, user_id):
             ttl = await redis.ttl(_KEY_BANNED.format(user_id=user_id))
             await event.answer(
@@ -67,7 +58,6 @@ class ThrottleMiddleware(BaseMiddleware):
             )
             return None
 
-        # Проверяем лимит
         is_throttled = await _check_rate(redis, user_id)
 
         if is_throttled:
@@ -80,10 +70,11 @@ class ThrottleMiddleware(BaseMiddleware):
                     f"🚫 Превышен лимит сообщений. "
                     f"Вы заблокированы на {settings.THROTTLE_BAN_TTL // 60} мин."
                 )
-            # Молча игнорируем — не отвечаем
+            elif violations == 1:
+                # Отвечаем один раз, чтобы человек понял, что происходит
+                await event.answer("⏳ Не так быстро, подождите пару секунд.")
             return None
 
-        # Сбрасываем счётчик нарушений при нормальном поведении
         await _reset_violations(redis, user_id)
         return await handler(event, data)
 
@@ -91,19 +82,16 @@ class ThrottleMiddleware(BaseMiddleware):
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 async def _check_rate(redis, user_id: int) -> bool:
-    """
-    Sliding window: True если лимит превышен.
-    Использует sorted set: score = timestamp.
-    """
+    """Sliding window: True если лимит превышен."""
     now    = time.time()
     window = settings.THROTTLE_PERIOD
     key    = _KEY_WINDOW.format(user_id=user_id)
 
     pipe = redis.pipeline()
-    pipe.zremrangebyscore(key, 0, now - window)    # удалить старые
-    pipe.zadd(key, {str(uuid4()): now})            # добавить текущую
-    pipe.zcard(key)                                # считаем кол-во
-    pipe.expire(key, window * 2)                   # TTL чуть больше окна
+    pipe.zremrangebyscore(key, 0, now - window)
+    pipe.zadd(key, {str(uuid4()): now})
+    pipe.zcard(key)
+    pipe.expire(key, window * 2)
     results = await pipe.execute()
 
     count: int = results[2]
@@ -125,7 +113,7 @@ async def _set_banned(redis, user_id: int) -> None:
 async def _increment_violations(redis, user_id: int) -> int:
     key = _KEY_VIOLATIONS.format(user_id=user_id)
     count = await redis.incr(key)
-    await redis.expire(key, 60)    # счётчик нарушений живёт 60 сек
+    await redis.expire(key, 60)
     return count
 
 

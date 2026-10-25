@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -91,10 +91,16 @@ class LinkRepository:
         active_to: datetime | None,
         admin_id: int,
     ) -> None:
+        # Новое расписание — сбрасываем флаг, чтобы планировщик его применил
         await self._s.execute(
             update(Link)
             .where(Link.id == link_id)
-            .values(active_from=active_from, active_to=active_to, updated_by=admin_id)
+            .values(
+                active_from=active_from,
+                active_to=active_to,
+                schedule_applied=False,
+                updated_by=admin_id,
+            )
         )
 
     async def soft_delete(self, link_id: int, admin_id: int) -> None:

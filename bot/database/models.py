@@ -19,7 +19,7 @@ from bot.database.base import Base, TimestampMixin
 class UserStatus(str, enum.Enum):
     ACTIVE  = "active"
     BANNED  = "banned"
-    DELETED = "deleted"
+    DELETED = "deleted"   # пользователь заблокировал бота
 
 
 class ActionType(str, enum.Enum):
@@ -93,6 +93,8 @@ class Link(Base, TimestampMixin):
     is_healthy:  Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     active_from: Mapped[datetime | None] = mapped_column(DateTime)
     active_to:   Mapped[datetime | None] = mapped_column(DateTime)
+    # True — расписание active_from уже отработало (не включать повторно)
+    schedule_applied: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     click_count: Mapped[int]  = mapped_column(Integer, default=0, server_default="0")
     created_by:  Mapped[int | None] = mapped_column(BigInteger)
     updated_by:  Mapped[int | None] = mapped_column(BigInteger)

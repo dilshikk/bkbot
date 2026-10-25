@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from urllib.parse import quote
 
 from aiogram import Router, F
@@ -66,13 +67,17 @@ async def _send_mirror(
         )
         return
 
-    # URL скрыт за гиперссылкой — пользователь видит красивый текст
+    # Имя бота берём из Telegram (aiogram кэширует ответ) — не хардкодим
+    me = await message.bot.me()
+    bot_tag = f"@{me.username}"
+
+    # FIX: экранируем URL — кавычка или < в адресе ломали HTML сообщения
     text = (
         "🎯 <b>Актуальное рабочее зеркало</b>\n\n"
-        f'👉 <a href="{link.url}">Перейти на сайт</a>\n\n'
-        "🤖 <b>Отправлено ботом:</b> @xBet_1xbot"
+        f'👉 <a href="{html.escape(link.url, quote=True)}">Перейти на сайт</a>\n\n'
+        f"🤖 <b>Отправлено ботом:</b> {bot_tag}"
     )
-    kb = _build_keyboard(link.url)
+    kb = _build_keyboard(link.url, bot_tag)
 
     photo_id: str | None = getattr(link, "photo_file_id", None)
 
@@ -142,8 +147,7 @@ async def _dispatch_photo(
             reply_markup=kb,
         )
     except TelegramBadRequest as exc:
-        exc_text = str(exc)
-        if _MSG_NOT_MODIFIED in exc_text:
+        if _MSG_NOT_MODIFIED in str(exc):
             return
         await _delete_safe(message)
         await message.answer_photo(
@@ -167,8 +171,7 @@ async def _dispatch_text(
     try:
         await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     except TelegramBadRequest as exc:
-        exc_text = str(exc)
-        if _MSG_NOT_MODIFIED in exc_text:
+        if _MSG_NOT_MODIFIED in str(exc):
             return
         await _delete_safe(message)
         await message.answer(text, parse_mode="HTML", reply_markup=kb)
@@ -181,11 +184,11 @@ async def _delete_safe(message: Message) -> None:
         pass
 
 
-def _build_keyboard(url: str) -> InlineKeyboardMarkup:
+def _build_keyboard(url: str, bot_tag: str) -> InlineKeyboardMarkup:
     share_url = (
         "https://t.me/share/url"
         f"?url={quote(url)}"
-        f"&text={quote('🎯 Актуальное рабочее зеркало @xBet_1xbot')}"
+        f"&text={quote(f'🎯 Актуальное рабочее зеркало {bot_tag}')}"
     )
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Перейти", url=url)],

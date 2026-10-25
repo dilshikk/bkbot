@@ -7,15 +7,16 @@ from typing import Any
 from aiogram import BaseMiddleware, Bot
 from aiogram.types import TelegramObject, Update, User as TgUser
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.core.redis_client import get_redis
-from bot.database.models import User
+from bot.core.background_tasks import create_background_task
 from bot.core.config import settings
+from bot.core.redis_client import get_redis
+from bot.database.models import User, UserStatus
 
 
 # Обновляем last_seen_at не чаще чем раз в 5 минут.
-# Без этого — UPDATE в БД на каждый апдейт = лишний round-trip к PostgreSQL.
 _LAST_SEEN_TTL = 300  # секунд
 _LAST_SEEN_KEY = "last_seen:{user_id}"
 
@@ -29,9 +30,6 @@ class UserSyncMiddleware(BaseMiddleware):
     """
     Автоматически создаёт или обновляет пользователя при каждом апдейте.
     Кладёт объект User в data["db_user"] для хендлеров.
-
-    PERF: last_seen_at обновляется через Redis-throttle (раз в 5 мин),
-    чтобы не делать лишний DB-flush на каждый апдейт.
     """
 
     async def __call__(
@@ -50,8 +48,14 @@ class UserSyncMiddleware(BaseMiddleware):
         db_user, is_new = await self._get_or_create(session, from_user)
         data["db_user"] = db_user
 
-        if is_new:
-            await _notify_admins_new_user(bot, db_user)
+        if is_new and settings.NOTIFY_NEW_USERS:
+            # Текст собираем сразу: после закрытия сессии объект db_user читать нельзя.
+            # Отправка в фоне — не задерживает ответ пользователю.
+            text = _new_user_text(db_user)
+            create_background_task(
+                _notify_admins_new_user(bot, text),
+                name=f"notify_new_user:{db_user.telegram_id}",
+            )
 
         return await handler(event, data)
 
@@ -88,10 +92,18 @@ class UserSyncMiddleware(BaseMiddleware):
                 registered_at=now,
                 last_seen_at=now,
             )
-            session.add(user)
-            await session.flush()
+            try:
+                # FIX: точка сохранения — при гонке двух апдейтов откатится
+                # только эта вставка, а не вся сессия
+                async with session.begin_nested():
+                    session.add(user)
+            except IntegrityError:
+                # Параллельный апдейт уже создал пользователя
+                user = (await session.execute(
+                    select(User).where(User.telegram_id == from_user.id)
+                )).scalar_one()
+                is_new = False
         else:
-            # Обновляем профильные поля если изменились
             changed = False
             for field, value in {
                 "username":   from_user.username,
@@ -102,9 +114,11 @@ class UserSyncMiddleware(BaseMiddleware):
                     setattr(user, field, value)
                     changed = True
 
-            # PERF: last_seen_at обновляем только раз в _LAST_SEEN_TTL секунд.
-            # Redis-ключ служит флагом "уже обновляли недавно".
-            # Без этого — UPDATE запрос на каждый апдейт замедляет цепочку.
+            # Пользователь снова пишет боту после блокировки — возвращаем в активные
+            if user.status == UserStatus.DELETED:
+                user.status = UserStatus.ACTIVE
+                changed = True
+
             should_update_seen = await _should_update_last_seen(from_user.id)
             if should_update_seen or changed:
                 user.last_seen_at = now
@@ -115,29 +129,28 @@ class UserSyncMiddleware(BaseMiddleware):
 
 async def _should_update_last_seen(telegram_id: int) -> bool:
     """
-    Возвращает True (и устанавливает TTL-ключ) если прошло достаточно времени
+    Возвращает True (и устанавливает TTL-ключ), если прошло достаточно времени
     с прошлого обновления last_seen_at.
     """
     redis = await get_redis()
     key = _LAST_SEEN_KEY.format(user_id=telegram_id)
-    # SET key 1 EX ttl NX — атомарно: ставим только если не существует
     result = await redis.set(key, "1", ex=_LAST_SEEN_TTL, nx=True)
-    # result == True  → ключа не было → обновляем
-    # result == None  → ключ есть     → пропускаем
     return result is True
 
 
-async def _notify_admins_new_user(bot: Bot, user: User) -> None:
+def _new_user_text(user: User) -> str:
     name = " ".join(filter(None, [user.first_name, user.last_name])) or "—"
     uname = f"@{user.username}" if user.username else "нет username"
-    text = (
+    return (
         f"👤 <b>Новый пользователь!</b>\n"
         f"{'━' * 22}\n"
         f"Имя: {name}\n"
         f"Username: {uname}\n"
-        f"ID: <code>{user.telegram_id}</code>\n"
-        f"Источник: {user.source or 'direct'}"
+        f"ID: <code>{user.telegram_id}</code>"
     )
+
+
+async def _notify_admins_new_user(bot: Bot, text: str) -> None:
     for admin_id in settings.ADMIN_IDS:
         try:
             await bot.send_message(admin_id, text, parse_mode="HTML")

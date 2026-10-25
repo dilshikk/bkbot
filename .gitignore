@@ -22,11 +22,9 @@ logs/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
 # OS
 .DS_Store
 Thumbs.db
-
-alembic.ini
-
-tests/
