@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     # Уведомлять админов о каждом новом пользователе
     NOTIFY_NEW_USERS:    bool = False
 
+    # Удалять системные сообщения (вошёл/вышел/смена названия и т.д.)
+    # во всех группах, где бот — администратор
+    CLEAN_SERVICE_MESSAGES: bool = True
+
     # Антиспам
     THROTTLE_RATE:       int = 3      # макс. сообщений
     THROTTLE_PERIOD:     int = 2      # за N секунд

@@ -13,6 +13,7 @@ from bot.middlewares.ban_check import BanCheckMiddleware
 from bot.middlewares.throttle import ThrottleMiddleware
 from bot.middlewares.subscription_guard import SubscriptionGuardMiddleware
 from bot.middlewares.private_only import PrivateOnlyMiddleware
+from bot.middlewares.service_cleaner import ServiceMessageCleanerMiddleware
 from bot.core.background_tasks import shutdown_background_tasks
 from bot.core.redis_client import close_redis
 from bot.handlers.admin import router as admin_router
@@ -36,6 +37,7 @@ async def main() -> None:
 
     # ── Middlewares (порядок критически важен) ───────────────
     #
+    # 0. ServiceMessageCleanerMiddleware — удалить системные сообщения в группах
     # 1. DbSessionMiddleware      — открыть сессию (нужна всем остальным)
     # 2. UserSyncMiddleware        — получить/создать db_user
     # 3. MaintenanceMiddleware     — тех. работы: блокировать всех кроме админов
@@ -44,6 +46,8 @@ async def main() -> None:
     # 6. ThrottleMiddleware        — антиспам (только Message)
     # 7. SubscriptionGuardMiddleware — проверить подписку (Message + CallbackQuery)
 
+    # Самым первым: служебные сообщения удаляются без обращения к БД
+    dp.update.outer_middleware(ServiceMessageCleanerMiddleware())
     dp.update.outer_middleware(DbSessionMiddleware())
     dp.update.outer_middleware(UserSyncMiddleware())
     dp.update.outer_middleware(MaintenanceMiddleware())  # ← после session/user
