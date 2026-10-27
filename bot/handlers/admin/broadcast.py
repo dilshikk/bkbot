@@ -1,10 +1,12 @@
 # bot/handlers/admin/broadcast.py
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime
+import html
+import re
+from datetime import datetime, timezone
 
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -14,6 +16,7 @@ from aiogram.types import (
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.core.background_tasks import create_background_task
 from bot.database.models import Broadcast, BroadcastStatus, User, UserStatus
 from bot.database.session import AsyncSessionFactory
 from bot.filters.admin import IsAdmin
@@ -23,11 +26,36 @@ from bot.services.broadcast_service import BroadcastService, run_broadcast_task
 
 router = Router(name="admin.broadcast")
 
+_TAG_RE = re.compile(r"<[^>]*>")
+
 
 class BroadcastFlow(StatesGroup):
     enter_text    = State()
     enter_photo   = State()
     enter_buttons = State()
+
+
+# ── Вспомогательные функции ───────────────────────────────────
+
+def _preview(text: str | None, limit: int) -> str:
+    """
+    Короткий безопасный превью текста рассылки.
+
+    FIX: раньше текст с HTML обрезался по символам — тег <a href="...">
+    разрезался пополам, и Telegram отвечал ошибкой
+    "Can't find end tag corresponding to start tag a". Теперь теги убираем,
+    а остаток экранируем.
+    """
+    if not text:
+        return "—"
+    plain = html.unescape(_TAG_RE.sub("", text)).strip()
+    if len(plain) > limit:
+        plain = plain[:limit].rstrip() + "…"
+    return html.escape(plain) or "—"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # ── Клавиатура меню рассылки ──────────────────────────────────
@@ -51,7 +79,6 @@ def broadcast_menu_keyboard(broadcast_id: int | None = None) -> InlineKeyboardMa
 
 @router.message(F.text == "📢 Рассылка", IsAdmin())
 async def broadcast_main(message: Message, session: AsyncSession) -> None:
-    repo   = BroadcastRepository(session)
     result = await session.execute(
         select(Broadcast)
         .where(
@@ -67,7 +94,7 @@ async def broadcast_main(message: Message, session: AsyncSession) -> None:
         text = (
             f"📢 <b>Рассылка</b>\n\n"
             f"У вас есть черновик #{draft.id}.\n"
-            f"Текст: {(draft.text or '—')[:80]}"
+            f"Текст: {_preview(draft.text, 80)}"
         )
     else:
         text = "📢 <b>Рассылка</b>\n\nСоздайте новую рассылку:"
@@ -135,6 +162,26 @@ async def bc_enter_text(
                 reply_markup=cancel_keyboard,
             )
             return
+
+        # Проверяем разметку сразу: лучше узнать об ошибке сейчас,
+        # чем разослать сломанное сообщение всем пользователям
+        try:
+            await message.answer(
+                text,
+                parse_mode="HTML",
+                link_preview_options={"is_disabled": True},
+            )
+        except TelegramBadRequest as e:
+            await message.answer(
+                "❌ Ошибка в HTML-разметке. Проверьте, что все теги закрыты "
+                "(например <code>&lt;/a&gt;</code>, <code>&lt;/b&gt;</code>), "
+                "и отправьте текст заново.\n\n"
+                f"<i>{html.escape(e.message)}</i>",
+                parse_mode="HTML",
+                reply_markup=cancel_keyboard,
+            )
+            return
+
         broadcast.text = text
         await session.flush()
 
@@ -238,9 +285,11 @@ async def bc_enter_buttons(
     if text != "-":
         for line in text.splitlines():
             line = line.strip()
+            if not line:
+                continue
             if "|" not in line:
                 await message.answer(
-                    f"❌ Неверный формат строки:\n<code>{line}</code>\n\n"
+                    f"❌ Неверный формат строки:\n<code>{html.escape(line)}</code>\n\n"
                     f"Формат: <code>Текст | https://url</code>",
                     parse_mode="HTML",
                     reply_markup=cancel_keyboard,
@@ -249,9 +298,9 @@ async def bc_enter_buttons(
             btn_text, _, btn_url = line.partition("|")
             btn_text = btn_text.strip()
             btn_url  = btn_url.strip()
-            if not btn_url.startswith("http"):
+            if not btn_text or not btn_url.startswith(("http://", "https://")):
                 await message.answer(
-                    f"❌ Некорректный URL: <code>{btn_url}</code>",
+                    f"❌ Некорректная кнопка: <code>{html.escape(line)}</code>",
                     parse_mode="HTML",
                     reply_markup=cancel_keyboard,
                 )
@@ -264,7 +313,7 @@ async def bc_enter_buttons(
 
     await message.answer(
         f"✅ <b>Черновик готов!</b>\n\n"
-        f"📄 Текст: {(broadcast.text or '—')[:100]}\n"
+        f"📄 Текст: {_preview(broadcast.text, 100)}\n"
         f"📸 Фото: {'✅ Да' if broadcast.photo_file_id else '❌ Нет'}\n"
         f"🔗 Кнопок: {len(buttons)}\n\n"
         f"Нажмите «👀 Предпросмотр» чтобы проверить,\n"
@@ -301,6 +350,11 @@ async def bc_start(call: CallbackQuery, session: AsyncSession) -> None:
         await call.answer("❌ Не найдено", show_alert=True)
         return
 
+    # Защита от двойного нажатия «Запустить»
+    if broadcast.status != BroadcastStatus.DRAFT:
+        await call.answer("ℹ️ Рассылка уже запущена или завершена", show_alert=True)
+        return
+
     if not broadcast.text and not broadcast.photo_file_id:
         await call.answer("❌ Нет текста или фото", show_alert=True)
         return
@@ -310,11 +364,12 @@ async def bc_start(call: CallbackQuery, session: AsyncSession) -> None:
     ) or 0
 
     broadcast.status     = BroadcastStatus.RUNNING
-    broadcast.started_at = datetime.utcnow()
+    broadcast.started_at = _utcnow()
     broadcast.total      = total
     await session.commit()
 
-    asyncio.create_task(
+    # Задача регистрируется — при остановке бота рассылка будет дождана
+    create_background_task(
         run_broadcast_task(AsyncSessionFactory, call.bot, broadcast_id),
         name=f"broadcast:{broadcast_id}",
     )
