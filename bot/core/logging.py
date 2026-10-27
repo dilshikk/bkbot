@@ -51,6 +51,10 @@ def setup_logging(level: str = "INFO", log_file: str | None = "logs/bot.log") ->
             compression="zip",    # сжимать старые файлы
             encoding="utf-8",
             enqueue=True,         # асинхронная запись — не блокирует бота
+            # Без значений переменных в traceback: иначе в файл попадают
+            # сообщения пользователей и служебные данные, а лог раздувается
+            diagnose=False,
+            backtrace=False,
         )
 
     # ── Перехватываем стандартный logging (aiogram, sqlalchemy) ──
@@ -84,9 +88,27 @@ class _InterceptHandler(logging.Handler):
         )
 
 
+class _NetworkRetryFilter(logging.Filter):
+    """
+    Кратковременные обрывы связи с Telegram (Connection reset, Bad Gateway)
+    aiogram сам переживает и повторяет запрос. Пишем их как WARNING,
+    чтобы настоящие ошибки было видно среди ERROR.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno == logging.ERROR and "Failed to fetch updates" in record.getMessage():
+            record.levelno = logging.WARNING
+            record.levelname = "WARNING"
+        return True
+
+
 def _intercept_standard_logging(level: str) -> None:
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
 
-    # Заглушаем слишком шумные логгеры
-    for noisy in ("aiohttp.access", "aiogram.dispatcher"):
+    # Заглушаем слишком шумные логгеры.
+    # apscheduler писал две строки на каждый запуск задачи (~98% лога),
+    # ошибки задач он по-прежнему пишет как WARNING/ERROR.
+    for noisy in ("aiohttp.access", "aiogram.dispatcher", "apscheduler"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    logging.getLogger("aiogram.dispatcher").addFilter(_NetworkRetryFilter())
