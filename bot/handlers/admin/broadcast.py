@@ -311,6 +311,13 @@ async def bc_enter_buttons(
     await session.flush()
     await state.clear()
 
+    # FIX: у одного сообщения может быть только одна клавиатура. Карточка
+    # черновика несёт inline-кнопки, поэтому нижняя кнопка «❌ Отмена»
+    # оставалась на экране. Сначала возвращаем админ-меню отдельным сообщением.
+    await message.answer(
+        "💾 Настройки сохранены.",
+        reply_markup=admin_main_keyboard(),
+    )
     await message.answer(
         f"✅ <b>Черновик готов!</b>\n\n"
         f"📄 Текст: {_preview(broadcast.text, 100)}\n"
