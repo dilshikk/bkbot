@@ -1,15 +1,17 @@
 """
-Чистка ответов бота на /link и /app в группах:
-  - новый ответ на команду удаляет прошлый ответ на ту же команду в чате;
-  - ответы удаляются по таймеру (GROUP_LINK_REPLY_TTL / GROUP_APP_REPLY_TTL).
+Чистка /link и /app в группах:
+  - новый вызов команды удаляет прошлую команду участника и прошлый ответ бота;
+  - команда и ответ удаляются по таймеру (GROUP_LINK_REPLY_TTL / GROUP_APP_REPLY_TTL);
+  - команда, отброшенная кулдауном, удаляется сразу (см. GroupCommandGateMiddleware).
 
 Ошибки Redis и Telegram логируются и не ломают ответ на команду.
-Для удаления бот должен быть администратором группы.
+Для удаления бот должен быть администратором группы с правом удалять сообщения.
 """
 from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 
 from aiogram import Bot
 from aiogram.exceptions import (
@@ -27,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 def reply_ttl(command: str) -> int:
-    """Через сколько секунд удалить ответ на команду (0 — не удалять по таймеру)."""
+    """Через сколько секунд удалить команду и ответ (0 — не удалять по таймеру)."""
     if command == "link":
         return settings.GROUP_LINK_REPLY_TTL
     if command == "app":
@@ -35,15 +37,20 @@ def reply_ttl(command: str) -> int:
     return 0
 
 
-async def track_reply(bot: Bot, chat_id: int, command: str, message_id: int) -> None:
-    """Запоминает новый ответ и удаляет предыдущий ответ на ту же команду."""
+async def track_reply(
+    bot: Bot,
+    chat_id: int,
+    command: str,
+    message_ids: Sequence[int],
+) -> None:
+    """Запоминает команду и ответ, удаляет сообщения прошлого вызова той же команды."""
     try:
         redis = await get_redis()
         previous = await remember_reply(
             redis,
             chat_id,
             command,
-            message_id,
+            message_ids,
             ttl=reply_ttl(command),
             now=time.time(),
         )
@@ -51,12 +58,12 @@ async def track_reply(bot: Bot, chat_id: int, command: str, message_id: int) -> 
         logger.warning("group replies: redis error, reply not tracked", exc_info=True)
         return
 
-    if previous is not None:
-        await delete_messages(bot, chat_id, [previous])
+    if previous:
+        await delete_messages(bot, chat_id, previous)
 
 
 async def cleanup_expired_replies(bot: Bot) -> None:
-    """Фоновая задача: удаляет ответы, у которых вышло время."""
+    """Фоновая задача: удаляет команды и ответы, у которых вышло время."""
     try:
         redis = await get_redis()
         expired = await claim_expired(redis, time.time())

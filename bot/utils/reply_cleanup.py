@@ -1,12 +1,14 @@
 """
-Учёт ответов бота на /link и /app в группах для последующего удаления.
+Учёт сообщений по /link и /app в группах для последующего удаления.
 
 Telegram не даёт боту читать историю чата, поэтому бот сам запоминает
-свои ответы в Redis (это переживает перезапуск бота):
+сообщения в Redis (это переживает перезапуск бота). На каждый вызов
+команды запоминаются два сообщения: сама команда участника и ответ бота.
 
   group_reply:last:{chat_id}:{command}
-      id последнего ответа на команду в чате. Новый ответ заменяет старый,
-      старый нужно удалить — в чате остаётся одна свежая ссылка.
+      id сообщений последнего вызова команды в чате через запятую
+      ("команда,ответ"). Новый вызов заменяет старый, старые сообщения
+      нужно удалить — в чате остаётся одна свежая пара.
 
   group_reply:expire  (sorted set)
       "chat_id:message_id" со временем удаления (unix-время).
@@ -19,6 +21,7 @@ Telegram не даёт боту читать историю чата, поэто
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Final
 
 from redis.asyncio import Redis
@@ -26,8 +29,8 @@ from redis.asyncio import Redis
 EXPIRE_KEY: Final[str] = "group_reply:expire"
 _LAST_KEY: Final[str] = "group_reply:last:{chat_id}:{command}"
 
-# Бот может удалить своё сообщение только в течение 48 часов —
-# дольше помнить последний ответ бессмысленно
+# Бот может удалить сообщение только в течение 48 часов —
+# дольше помнить последний вызов бессмысленно
 _LAST_KEY_TTL: Final[int] = 48 * 3600
 
 
@@ -43,10 +46,23 @@ def _parse_member(member: str) -> tuple[int, int] | None:
         return None
 
 
-async def _swap_last_reply(redis: Redis, key: str, message_id: int) -> str | None:
-    """Сохраняет новый id и возвращает прежний. Атомарно, работает на любом Redis."""
+def _parse_ids(raw: str | None) -> list[int]:
+    """"10,11" -> [10, 11]. Старый формат (один id) тоже читается."""
+    if not raw:
+        return []
+    ids: list[int] = []
+    for part in raw.split(","):
+        try:
+            ids.append(int(part))
+        except ValueError:
+            continue
+    return ids
+
+
+async def _swap_last(redis: Redis, key: str, value: str) -> str | None:
+    """Сохраняет новое значение и возвращает прежнее. Атомарно, работает на любом Redis."""
     async with redis.pipeline(transaction=True) as pipe:
-        pipe.getset(key, str(message_id))
+        pipe.getset(key, value)
         pipe.expire(key, _LAST_KEY_TTL)
         previous, _ = await pipe.execute()
     return previous
@@ -56,36 +72,35 @@ async def remember_reply(
     redis: Redis,
     chat_id: int,
     command: str,
-    message_id: int,
+    message_ids: Sequence[int],
     *,
     ttl: int,
     now: float,
-) -> int | None:
+) -> list[int]:
     """
-    Запоминает новый ответ бота и ставит его на удаление через `ttl` секунд
-    (ttl <= 0 — по таймеру не удалять).
+    Запоминает сообщения нового вызова команды (команда участника и ответ бота)
+    и ставит их на удаление через `ttl` секунд (ttl <= 0 — по таймеру не удалять).
 
-    Возвращает id предыдущего ответа на эту же команду в этом чате —
-    его нужно удалить. None — удалять нечего.
+    Возвращает id сообщений предыдущего вызова этой же команды в этом чате —
+    их нужно удалить. Пустой список — удалять нечего.
     """
+    current = list(dict.fromkeys(message_ids))
+    if not current:
+        return []
+
     key = _LAST_KEY.format(chat_id=chat_id, command=command)
-    previous = await _swap_last_reply(redis, key, message_id)
+    previous = await _swap_last(redis, key, ",".join(map(str, current)))
 
     if ttl > 0:
-        await redis.zadd(EXPIRE_KEY, {_member(chat_id, message_id): now + ttl})
+        await redis.zadd(
+            EXPIRE_KEY, {_member(chat_id, mid): now + ttl for mid in current}
+        )
 
-    if previous is None:
-        return None
-    try:
-        previous_id = int(previous)
-    except ValueError:
-        return None
-    if previous_id == message_id:
-        return None
-
-    # Старый ответ удаляется прямо сейчас — таймер для него больше не нужен
-    await redis.zrem(EXPIRE_KEY, _member(chat_id, previous_id))
-    return previous_id
+    to_delete = [mid for mid in _parse_ids(previous) if mid not in current]
+    if to_delete:
+        # Старые сообщения удаляются прямо сейчас — таймер для них больше не нужен
+        await redis.zrem(EXPIRE_KEY, *(_member(chat_id, mid) for mid in to_delete))
+    return to_delete
 
 
 async def claim_expired(
@@ -94,8 +109,8 @@ async def claim_expired(
     limit: int = 100,
 ) -> dict[int, list[int]]:
     """
-    Забирает просроченные ответы: {chat_id: [message_id, ...]}.
-    Забранные записи удаляются из очереди, поэтому каждый ответ
+    Забирает просроченные сообщения: {chat_id: [message_id, ...]}.
+    Забранные записи удаляются из очереди, поэтому каждое сообщение
     достаётся только одному вызову.
     """
     members = await redis.zrangebyscore(EXPIRE_KEY, "-inf", now, start=0, num=limit)
