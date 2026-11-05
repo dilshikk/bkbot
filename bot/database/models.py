@@ -167,6 +167,8 @@ class Broadcast(Base, TimestampMixin):
     total:         Mapped[int]  = mapped_column(Integer, default=0)
     sent:          Mapped[int]  = mapped_column(Integer, default=0)
     failed:        Mapped[int]  = mapped_column(Integer, default=0)
+    # Последний обработанный users.id — для продолжения после перезапуска
+    last_user_id:  Mapped[int]  = mapped_column(Integer, default=0, server_default="0")
     created_by:    Mapped[int | None] = mapped_column(BigInteger)
 
 
