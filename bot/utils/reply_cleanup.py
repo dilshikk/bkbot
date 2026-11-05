@@ -12,6 +12,9 @@ Telegram не даёт боту читать историю чата, поэто
       "chat_id:message_id" со временем удаления (unix-время).
       Фоновая задача забирает просроченные записи и удаляет сообщения.
 
+Используются только команды, доступные в старых версиях Redis (< 6.2):
+без SET ... GET, вместо него GETSET + EXPIRE в одной транзакции.
+
 Модуль не зависит от конфига и aiogram — легко тестируется.
 """
 from __future__ import annotations
@@ -40,6 +43,15 @@ def _parse_member(member: str) -> tuple[int, int] | None:
         return None
 
 
+async def _swap_last_reply(redis: Redis, key: str, message_id: int) -> str | None:
+    """Сохраняет новый id и возвращает прежний. Атомарно, работает на любом Redis."""
+    async with redis.pipeline(transaction=True) as pipe:
+        pipe.getset(key, str(message_id))
+        pipe.expire(key, _LAST_KEY_TTL)
+        previous, _ = await pipe.execute()
+    return previous
+
+
 async def remember_reply(
     redis: Redis,
     chat_id: int,
@@ -57,7 +69,7 @@ async def remember_reply(
     его нужно удалить. None — удалять нечего.
     """
     key = _LAST_KEY.format(chat_id=chat_id, command=command)
-    previous = await redis.set(key, str(message_id), ex=_LAST_KEY_TTL, get=True)
+    previous = await _swap_last_reply(redis, key, message_id)
 
     if ttl > 0:
         await redis.zadd(EXPIRE_KEY, {_member(chat_id, message_id): now + ttl})
