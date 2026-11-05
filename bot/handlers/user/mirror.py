@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import html
-from urllib.parse import quote
-
 from aiogram import Router, F
 from aiogram.types import (
     Message,
@@ -17,6 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.models import User, ActionType
 from bot.repositories.log_repo import LogRepository
+from bot.services.delivery import (
+    REFRESH_MIRROR_CALLBACK,
+    mirror_keyboard,
+    mirror_text,
+)
 from bot.services.link_service import LinkService
 
 router = Router(name="user.mirror")
@@ -31,7 +33,7 @@ async def get_mirror(message: Message, session: AsyncSession, db_user: User) -> 
     await _send_mirror(message, session, db_user, edit=False)
 
 
-@router.callback_query(F.data == "refresh_mirror")
+@router.callback_query(F.data == REFRESH_MIRROR_CALLBACK)
 async def refresh_mirror(
     call: CallbackQuery,
     session: AsyncSession,
@@ -71,13 +73,8 @@ async def _send_mirror(
     me = await message.bot.me()
     bot_tag = f"@{me.username}"
 
-    # FIX: экранируем URL — кавычка или < в адресе ломали HTML сообщения
-    text = (
-        "🎯 <b>Актуальное рабочее зеркало</b>\n\n"
-        f'👉 <a href="{html.escape(link.url, quote=True)}">Перейти на сайт</a>\n\n'
-        f"🤖 <b>Отправлено ботом:</b> {bot_tag}"
-    )
-    kb = _build_keyboard(link.url, bot_tag)
+    text = mirror_text(link.url, bot_tag)
+    kb = mirror_keyboard(link.url, bot_tag)
 
     photo_id: str | None = getattr(link, "photo_file_id", None)
 
@@ -99,7 +96,7 @@ async def _handle_no_link(message: Message, edit: bool) -> None:
         "Попробуйте через несколько минут."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="refresh_mirror"),
+        InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=REFRESH_MIRROR_CALLBACK),
     ]])
 
     if edit:
@@ -182,16 +179,3 @@ async def _delete_safe(message: Message) -> None:
         await message.delete()
     except TelegramBadRequest:
         pass
-
-
-def _build_keyboard(url: str, bot_tag: str) -> InlineKeyboardMarkup:
-    share_url = (
-        "https://t.me/share/url"
-        f"?url={quote(url)}"
-        f"&text={quote(f'🎯 Актуальное рабочее зеркало {bot_tag}')}"
-    )
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Перейти", url=url)],
-        [InlineKeyboardButton(text="📤 Поделиться", url=share_url)],
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_mirror")],
-    ])

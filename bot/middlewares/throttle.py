@@ -11,6 +11,9 @@
 пользователь получает временный бан на THROTTLE_BAN_TTL секунд.
 
 Администраторы (settings.ADMIN_IDS) полностью освобождены от лимитов.
+В группах работает кулдаун на чат (GroupCommandGateMiddleware),
+поэтому здесь групповые сообщения не ограничиваются и не получают
+предупреждений в общий чат.
 """
 from __future__ import annotations
 
@@ -38,6 +41,10 @@ class ThrottleMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         if not isinstance(event, Message) or event.from_user is None:
+            return await handler(event, data)
+
+        # Группы ограничиваются кулдауном на чат, а не персональным антиспамом
+        if event.chat.type != "private":
             return await handler(event, data)
 
         user_id = event.from_user.id

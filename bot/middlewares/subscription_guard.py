@@ -25,6 +25,8 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
     Регистрируется на dp.message и dp.callback_query (НЕ на dp.update).
     Если пользователь отписался — показывает экран подписки.
     Администраторы (settings.ADMIN_IDS) полностью освобождены от проверки.
+    В группах проверка не выполняется: команды /app и /link
+    общедоступны, а экран подписки засорял бы общий чат.
     """
 
     async def __call__(
@@ -33,6 +35,9 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        if _is_group_event(event):
+            return await handler(event, data)
+
         user_id = _extract_user_id(event)
         if user_id in settings.ADMIN_IDS:
             return await handler(event, data)
@@ -102,6 +107,14 @@ class SubscriptionGuardMiddleware(BaseMiddleware):
             return False
 
         return True
+
+
+def _is_group_event(event: TelegramObject) -> bool:
+    if isinstance(event, Message):
+        return event.chat.type != "private"
+    if isinstance(event, CallbackQuery) and event.message is not None:
+        return event.message.chat.type != "private"
+    return False
 
 
 def _extract_user_id(event: TelegramObject) -> int:

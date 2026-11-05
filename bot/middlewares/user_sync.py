@@ -14,6 +14,7 @@ from bot.core.background_tasks import create_background_task
 from bot.core.config import settings
 from bot.core.redis_client import get_redis
 from bot.database.models import User, UserStatus
+from bot.utils.group_commands import GROUP_COMMAND_KEY
 
 
 # Обновляем last_seen_at не чаще чем раз в 5 минут.
@@ -30,6 +31,10 @@ class UserSyncMiddleware(BaseMiddleware):
     """
     Автоматически создаёт или обновляет пользователя при каждом апдейте.
     Кладёт объект User в data["db_user"] для хендлеров.
+
+    Для команд из групп пользователь НЕ создаётся: участник группы,
+    ни разу не запускавший бота, не должен попадать в статистику
+    и рассылки. Берётся только уже существующая запись (для проверки бана).
     """
 
     async def __call__(
@@ -44,6 +49,12 @@ class UserSyncMiddleware(BaseMiddleware):
 
         session: AsyncSession = data["session"]
         bot: Bot = data["bot"]
+
+        if data.get(GROUP_COMMAND_KEY):
+            existing = await self._get_existing(session, from_user.id)
+            if existing is not None:
+                data["db_user"] = existing
+            return await handler(event, data)
 
         db_user, is_new = await self._get_or_create(session, from_user)
         data["db_user"] = db_user
@@ -69,6 +80,13 @@ class UserSyncMiddleware(BaseMiddleware):
             if event.inline_query:
                 return event.inline_query.from_user
         return getattr(event, "from_user", None)
+
+    @staticmethod
+    async def _get_existing(session: AsyncSession, telegram_id: int) -> User | None:
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+        return result.scalar_one_or_none()
 
     @staticmethod
     async def _get_or_create(

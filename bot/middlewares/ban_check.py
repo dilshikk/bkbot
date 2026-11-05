@@ -12,6 +12,7 @@ class BanCheckMiddleware(BaseMiddleware):
     """
     Блокирует забаненных пользователей до попадания в хендлер.
     Администраторы никогда не блокируются.
+    В группах забаненный получает тишину — бот не пишет о бане в общий чат.
     """
 
     async def __call__(
@@ -27,7 +28,7 @@ class BanCheckMiddleware(BaseMiddleware):
             if db_user.telegram_id in settings.ADMIN_IDS:
                 return await handler(event, data)
 
-            if isinstance(event, Message):
+            if isinstance(event, Message) and event.chat.type == "private":
                 reason = db_user.ban_reason or "Нарушение правил."
                 await event.answer(f"🚫 Ваш аккаунт заблокирован.\n\n{reason}")
             return None
