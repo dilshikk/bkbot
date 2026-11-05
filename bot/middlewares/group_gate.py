@@ -11,6 +11,9 @@
   - отправитель не бот (анонимные админы группы разрешены)
   - в этом чате не сработал кулдаун (GROUP_COMMANDS_COOLDOWN)
 
+Команда, отброшенная кулдауном, сразу удаляется — иначе она останется
+в чате без ответа (свежий ответ на неё и так уже есть выше).
+
 Разрешённая команда отмечается в data[GROUP_COMMAND_KEY] — по этой метке
 остальные middleware понимают, что это групповая команда.
 """
@@ -26,6 +29,7 @@ from redis.exceptions import RedisError
 
 from bot.core.config import settings
 from bot.core.redis_client import get_redis
+from bot.services.group_replies import delete_messages
 from bot.utils.group_commands import (
     GROUP_CHAT_TYPES,
     GROUP_COMMAND_KEY,
@@ -47,9 +51,15 @@ class GroupCommandGateMiddleware(BaseMiddleware):
         if message is None or message.chat.type not in GROUP_CHAT_TYPES:
             return await handler(event, data)
 
-        command = await _resolve_command(message, data["bot"])
+        bot: Bot = data["bot"]
+        command = await _resolve_command(message, bot)
         if command is None:
             # Всё остальное в группах бот молча игнорирует
+            return None
+
+        if not await _try_cooldown(message.chat.id, command):
+            logger.debug("group command on cooldown chat=%s cmd=%s", message.chat.id, command)
+            await delete_messages(bot, message.chat.id, [message.message_id])
             return None
 
         data[GROUP_COMMAND_KEY] = command
@@ -57,6 +67,7 @@ class GroupCommandGateMiddleware(BaseMiddleware):
 
 
 async def _resolve_command(message: Message, bot: Bot) -> str | None:
+    """Команда для этого бота или None, если сообщение нас не касается."""
     if not settings.GROUP_COMMANDS_ENABLED:
         return None
 
@@ -71,15 +82,7 @@ async def _resolve_command(message: Message, bot: Bot) -> str | None:
         return None
 
     me = await bot.me()
-    command = parse_group_command(message.text, me.username)
-    if command is None:
-        return None
-
-    if not await _try_cooldown(message.chat.id, command):
-        logger.debug("group command on cooldown chat=%s cmd=%s", message.chat.id, command)
-        return None
-
-    return command
+    return parse_group_command(message.text, me.username)
 
 
 async def _try_cooldown(chat_id: int, command: str) -> bool:

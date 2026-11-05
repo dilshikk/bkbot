@@ -7,8 +7,9 @@
 (включено, чат разрешён, адресовано этому боту, нет кулдауна).
 Бот отвечает реплаем на команду, в той же теме форума.
 
-Чтобы не засорять чат, каждый ответ учитывается (bot/services/group_replies.py):
-новый ответ удаляет прошлый ответ на ту же команду, а сам удаляется по таймеру.
+Чтобы не засорять чат, команда участника и ответ бота учитываются
+(bot/services/group_replies.py): новый вызов удаляет прошлый вызов той же
+команды, а сам удаляется по таймеру.
 """
 from __future__ import annotations
 
@@ -133,7 +134,7 @@ async def _send(
     document_id: str | None = None,
 ) -> bool:
     """
-    Отвечает на команду и ставит ответ на учёт для чистки.
+    Отвечает на команду и ставит команду и ответ на учёт для чистки.
     Ошибки Telegram (нет прав писать или слать файлы, флуд-лимит,
     битый file_id) логируются и не роняют обработку апдейта.
     """
@@ -169,9 +170,16 @@ async def _send(
         logger.warning(
             "group command: cannot send to chat=%s: %s", message.chat.id, exc,
         )
+        # Ответа нет, но саму команду всё равно убираем по таймеру
+        await track_reply(message.bot, message.chat.id, command, [message.message_id])
         return False
 
-    await track_reply(message.bot, message.chat.id, command, sent.message_id)
+    await track_reply(
+        message.bot,
+        message.chat.id,
+        command,
+        [message.message_id, sent.message_id],
+    )
     return True
 
 
