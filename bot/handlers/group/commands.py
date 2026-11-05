@@ -6,6 +6,9 @@
 Сюда доходят только команды, пропущенные GroupCommandGateMiddleware
 (включено, чат разрешён, адресовано этому боту, нет кулдауна).
 Бот отвечает реплаем на команду, в той же теме форума.
+
+Чтобы не засорять чат, каждый ответ учитывается (bot/services/group_replies.py):
+новый ответ удаляет прошлый ответ на ту же команду, а сам удаляется по таймеру.
 """
 from __future__ import annotations
 
@@ -31,6 +34,7 @@ from bot.services.delivery import (
     mirror_keyboard,
     mirror_text,
 )
+from bot.services.group_replies import track_reply
 from bot.services.link_service import LinkService
 from bot.services.settings_service import get_settings
 from bot.utils.group_commands import GROUP_CHAT_TYPES
@@ -60,7 +64,7 @@ async def group_link(
     link = await link_service.get_active()
 
     if link is None:
-        await _send(message, text=_NO_LINK_TEXT)
+        await _send(message, "link", text=_NO_LINK_TEXT)
         await log_repo.log(
             ActionType.GET_MIRROR,
             **_identity(message, db_user),
@@ -74,6 +78,7 @@ async def group_link(
     # Без кнопки «Обновить»: в группе её мог бы нажать любой участник
     sent = await _send(
         message,
+        "link",
         text=mirror_text(link.url, bot_tag),
         reply_markup=mirror_keyboard(link.url, bot_tag, with_refresh=False),
         photo_id=link.photo_file_id,
@@ -101,10 +106,10 @@ async def group_app(
     file_id = available_app_file_id(bot_settings)
 
     if file_id is None:
-        await _send(message, text=_NO_APP_TEXT)
+        await _send(message, "app", text=_NO_APP_TEXT)
         return
 
-    sent = await _send(message, text=app_caption(bot_settings), document_id=file_id)
+    sent = await _send(message, "app", text=app_caption(bot_settings), document_id=file_id)
     if not sent:
         return
 
@@ -120,6 +125,7 @@ async def group_app(
 
 async def _send(
     message: Message,
+    command: str,
     *,
     text: str,
     reply_markup: InlineKeyboardMarkup | None = None,
@@ -127,8 +133,9 @@ async def _send(
     document_id: str | None = None,
 ) -> bool:
     """
-    Отвечает на команду. Ошибки Telegram (нет прав писать или слать файлы,
-    флуд-лимит, битый file_id) логируются и не роняют обработку апдейта.
+    Отвечает на команду и ставит ответ на учёт для чистки.
+    Ошибки Telegram (нет прав писать или слать файлы, флуд-лимит,
+    битый file_id) логируются и не роняют обработку апдейта.
     """
     # Если команду успели удалить — сообщение всё равно уйдёт, без реплая
     reply = ReplyParameters(
@@ -137,14 +144,14 @@ async def _send(
     )
     try:
         if document_id:
-            await message.answer_document(
+            sent = await message.answer_document(
                 document=document_id,
                 caption=text,
                 parse_mode="HTML",
                 reply_parameters=reply,
             )
         elif photo_id:
-            await message.answer_photo(
+            sent = await message.answer_photo(
                 photo=photo_id,
                 caption=text,
                 parse_mode="HTML",
@@ -152,18 +159,20 @@ async def _send(
                 reply_parameters=reply,
             )
         else:
-            await message.answer(
+            sent = await message.answer(
                 text,
                 parse_mode="HTML",
                 reply_markup=reply_markup,
                 reply_parameters=reply,
             )
-        return True
     except (TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter) as exc:
         logger.warning(
             "group command: cannot send to chat=%s: %s", message.chat.id, exc,
         )
         return False
+
+    await track_reply(message.bot, message.chat.id, command, sent.message_id)
+    return True
 
 
 def _identity(message: Message, db_user: User | None) -> dict[str, Any]:

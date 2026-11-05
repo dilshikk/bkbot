@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     GROUP_COMMANDS_CHAT_IDS: list[int] = []   # пусто — во всех группах
     GROUP_COMMANDS_COOLDOWN: int = 30         # сек. между одинаковыми командами в одном чате
 
+    # Через сколько секунд бот удаляет свой ответ в группе (0 — не удалять по таймеру).
+    # Прошлый ответ на ту же команду удаляется всегда, когда приходит новый.
+    GROUP_LINK_REPLY_TTL:    int = 120        # ответ на /link — 2 минуты
+    GROUP_APP_REPLY_TTL:     int = 300        # ответ на /app — 5 минут
+
     # Антиспам
     THROTTLE_RATE:       int = 3      # макс. сообщений
     THROTTLE_PERIOD:     int = 2      # за N секунд
