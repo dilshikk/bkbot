@@ -7,8 +7,8 @@
 set_default_commands()
     │
     ├── Личные сообщения (AllPrivateChats)   → пользовательские команды
-    ├── Группы (AllGroupChats)               → пустой список (скрыть)
-    ├── Администраторы групп (AllChatAdmins) → пустой список (скрыть)
+    ├── Группы (AllGroupChats)               → /app, /link (или пусто, если выключено)
+    ├── Администраторы групп (AllChatAdmins) → то же, что и для групп
     └── ADMIN_IDS (BotCommandScopeChat)      → персональные команды
 """
 from __future__ import annotations
@@ -41,8 +41,17 @@ ADMIN_COMMANDS: list[BotCommand] = USER_COMMANDS + [
     BotCommand(command="admin", description="🔐 Админ-панель"),
 ]
 
+GROUP_COMMANDS: list[BotCommand] = [
+    BotCommand(command="link", description="🎯 Актуальное зеркало"),
+    BotCommand(command="app",  description="📱 Скачать приложение"),
+]
+
 # Пустой список — Telegram скрывает меню команд полностью
 _NO_COMMANDS: list[BotCommand] = []
+
+
+def _group_commands() -> list[BotCommand]:
+    return GROUP_COMMANDS if settings.GROUP_COMMANDS_ENABLED else _NO_COMMANDS
 
 
 # ── Установка ─────────────────────────────────────────────────
@@ -61,19 +70,20 @@ async def set_default_commands(bot: Bot) -> None:
     )
     logger.debug("commands: set USER_COMMANDS for AllPrivateChats")
 
-    # 2. Все группы — скрываем команды (пустой список)
+    # 2. Все группы — /app и /link (или пусто, если функция выключена)
+    group_commands = _group_commands()
     await bot.set_my_commands(
-        commands=_NO_COMMANDS,
+        commands=group_commands,
         scope=BotCommandScopeAllGroupChats(),
     )
-    logger.debug("commands: cleared for AllGroupChats")
+    logger.debug("commands: set %d commands for AllGroupChats", len(group_commands))
 
-    # 3. Администраторы групп — тоже скрываем
+    # 3. Администраторы групп — тот же набор, иначе у них меню было бы пустым
     await bot.set_my_commands(
-        commands=_NO_COMMANDS,
+        commands=group_commands,
         scope=BotCommandScopeAllChatAdministrators(),
     )
-    logger.debug("commands: cleared for AllChatAdministrators")
+    logger.debug("commands: set %d commands for AllChatAdministrators", len(group_commands))
 
     # 4. Персональные команды для каждого админа бота
     for admin_id in settings.ADMIN_IDS:

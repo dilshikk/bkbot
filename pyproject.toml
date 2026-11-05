@@ -2,6 +2,7 @@
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+pythonpath = ["."]
 
 [tool.coverage.run]
 source = ["bot/services", "bot/repositories", "bot/handlers"]

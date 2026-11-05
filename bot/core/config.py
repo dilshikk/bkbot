@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     # во всех группах, где бот — администратор
     CLEAN_SERVICE_MESSAGES: bool = True
 
+    # Команды /app и /link в группах
+    GROUP_COMMANDS_ENABLED:  bool = True
+    GROUP_COMMANDS_CHAT_IDS: list[int] = []   # пусто — во всех группах
+    GROUP_COMMANDS_COOLDOWN: int = 30         # сек. между одинаковыми командами в одном чате
+
     # Антиспам
     THROTTLE_RATE:       int = 3      # макс. сообщений
     THROTTLE_PERIOD:     int = 2      # за N секунд
