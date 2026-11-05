@@ -3,6 +3,10 @@
 
 Батчинг: по 30 пользователей с задержкой 0.05 сек между сообщениями.
 Это ~600 сообщений/мин — в пределах лимита Telegram (30/сек на бота).
+
+FIX (#10): прогресс (last_user_id, sent, failed) сохраняется в БД,
+поэтому после перезапуска бота рассылка продолжается с того же места
+(см. resume_running_broadcasts), а не зависает в статусе RUNNING.
 """
 from __future__ import annotations
 
@@ -108,6 +112,30 @@ class BroadcastService:
         await self._s.flush()
 
 
+# ── Возобновление после перезапуска ─────────────────────────
+
+async def resume_running_broadcasts(
+    session_factory: async_sessionmaker[AsyncSession],
+    bot: Bot,
+) -> list[int]:
+    """
+    Вызывается при старте бота: продолжает рассылки, которые были
+    прерваны перезапуском (остались в статусе RUNNING).
+    """
+    async with session_factory() as session:
+        broadcast_ids = list((await session.scalars(
+            select(Broadcast.id).where(Broadcast.status == BroadcastStatus.RUNNING)
+        )).all())
+
+    for broadcast_id in broadcast_ids:
+        create_background_task(
+            run_broadcast_task(session_factory, bot, broadcast_id),
+            name=f"broadcast:{broadcast_id}",
+        )
+        logger.info("broadcast_id=%s resumed after restart", broadcast_id)
+    return broadcast_ids
+
+
 # ── Фоновая задача ──────────────────────────────────────────
 
 async def run_broadcast_task(
@@ -118,9 +146,10 @@ async def run_broadcast_task(
     """
     Выполняется вне основного запроса. Использует собственную сессию БД.
 
-    FIX: выборка по последнему id (keyset) вместо OFFSET — список не «съезжает»,
-    если кто-то выбыл из активных во время рассылки.
-    FIX: заблокировавшие бота помечаются status=DELETED и больше не получают рассылки.
+    - Выборка по последнему id (keyset) вместо OFFSET — список не «съезжает».
+    - Заблокировавшие бота помечаются status=DELETED.
+    - Прогресс (последний обработанный id) сохраняется после каждого батча
+      и при остановке бота, поэтому повторный запуск никому не шлёт дубли.
     """
     async with session_factory() as session:
         broadcast = await session.get(Broadcast, broadcast_id)
@@ -131,8 +160,11 @@ async def run_broadcast_task(
             return
 
         kb = _build_keyboard(broadcast.buttons)
-        last_id = 0
-        sent = failed = processed = 0
+        # Продолжаем с места остановки (0 — новая рассылка)
+        last_done_id = broadcast.last_user_id or 0
+        sent = broadcast.sent or 0
+        failed = broadcast.failed or 0
+        processed = 0
         blocked_ids: list[int] = []
 
         async def save_progress() -> None:
@@ -145,26 +177,26 @@ async def run_broadcast_task(
                 blocked_ids.clear()
             broadcast.sent = sent
             broadcast.failed = failed
+            broadcast.last_user_id = last_done_id
             await session.commit()
 
         try:
             while True:
                 rows = (await session.execute(
                     select(User.id, User.telegram_id)
-                    .where(User.status == UserStatus.ACTIVE, User.id > last_id)
+                    .where(User.status == UserStatus.ACTIVE, User.id > last_done_id)
                     .order_by(User.id)
                     .limit(_BATCH_SIZE)
                 )).all()
                 if not rows:
                     break
-                last_id = rows[-1].id
 
                 for row in rows:
                     processed += 1
                     if processed % _CANCEL_CHECK_INTERVAL == 0:
+                        await save_progress()
                         await session.refresh(broadcast)
                         if broadcast.status == BroadcastStatus.CANCELLED:
-                            await save_progress()
                             logger.info("broadcast_id=%s cancelled mid-flight", broadcast_id)
                             return
 
@@ -175,10 +207,11 @@ async def run_broadcast_task(
                         failed += 1
                         if result is SendResult.BLOCKED:
                             blocked_ids.append(row.id)
+                    # Отмечаем сразу после отправки — при остановке не будет дублей
+                    last_done_id = row.id
 
                     await asyncio.sleep(_SEND_DELAY)
 
-                # Прогресс сохраняем после каждого батча
                 await save_progress()
 
             broadcast.status = BroadcastStatus.DONE
@@ -190,10 +223,24 @@ async def run_broadcast_task(
                 broadcast_id, sent, failed,
             )
 
+        except asyncio.CancelledError:
+            # Бот останавливается: сохраняем прогресс, статус остаётся RUNNING,
+            # при следующем старте resume_running_broadcasts продолжит рассылку
+            logger.info("broadcast_id=%s paused at user_id=%s", broadcast_id, last_done_id)
+            try:
+                await session.rollback()
+                await save_progress()
+            except Exception:
+                logger.exception("broadcast_id=%s: cannot save progress", broadcast_id)
+            raise
+
         except Exception:
             logger.exception("broadcast_id=%s crashed", broadcast_id)
             await session.rollback()
             broadcast.status = BroadcastStatus.FAILED
+            broadcast.sent = sent
+            broadcast.failed = failed
+            broadcast.last_user_id = last_done_id
             await session.commit()
 
 
@@ -226,7 +273,6 @@ async def _send_one(
         return SendResult.OK
 
     except TelegramRetryAfter as e:
-        # FIX: ограничиваем число повторов — раньше рекурсия была бесконечной
         if attempt >= _MAX_RETRIES:
             logger.error("telegram_id=%s: retry limit reached", telegram_id)
             return SendResult.FAILED
