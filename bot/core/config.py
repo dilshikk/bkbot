@@ -34,6 +34,11 @@ class Settings(BaseSettings):
 
     # Прокси для проверки зеркал (например http://user:pass@host:port)
     HEALTHCHECK_PROXY:   str | None = None
+    # Считать ответ 403 рабочим (Cloudflare часто так отвечает ботам при живом сайте).
+    # Если заблокированные зеркала отвечают 403 — выключите.
+    HEALTHCHECK_OK_403:  bool = True
+    # Когда все активные зеркала упали — включить следующее рабочее по приоритету
+    AUTO_SWITCH_ON_DOWN: bool = True
 
     model_config = SettingsConfigDict(
         env_file=".env",

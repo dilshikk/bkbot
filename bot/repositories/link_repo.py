@@ -13,7 +13,7 @@ class LinkRepository:
     async def get_all(self) -> list[Link]:
         result = await self._s.execute(
             select(Link)
-            .where(Link.is_deleted == False)
+            .where(Link.is_deleted == False)  # noqa: E712
             .order_by(Link.priority.desc(), Link.id.desc())
         )
         return list(result.scalars().all())
@@ -41,11 +41,11 @@ class LinkRepository:
         await self._s.flush()
         return link
 
-    async def activate(self, link_id: int, admin_id: int) -> None:
-        """Деактивировать все → активировать выбранную."""
+    async def activate(self, link_id: int, admin_id: int | None) -> None:
+        """Деактивировать все → активировать выбранную. admin_id=None — сделал бот."""
         await self._s.execute(
             update(Link)
-            .where(Link.is_deleted == False)
+            .where(Link.is_deleted == False)  # noqa: E712
             .values(is_active=False)
         )
         await self._s.execute(

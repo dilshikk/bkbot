@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -21,16 +23,17 @@ from bot.core.redis_client import get_redis
 from bot.database.models import (
     ActionLog, ActionType, Broadcast, BroadcastStatus, Link, User, UserStatus,
 )
+from bot.repositories.link_repo import LinkRepository
+from bot.services.admin_notify import notify_admins
+from bot.utils.mirrors import (
+    needs_switch, pick_replacement, same_site, site_host, status_ok,
+)
 
 logger = logging.getLogger(__name__)
 
 # Таймаут HTTP-пинга зеркала
 _PING_TIMEOUT = aiohttp.ClientTimeout(total=8, connect=4)
 
-# 2xx/3xx — сайт работает. 403 оставлен рабочим: защита Cloudflare часто
-# отвечает так ботам при живом сайте. Если ваши заблокированные зеркала
-# отвечают именно 403 — уберите его из набора.
-_EXTRA_OK_CODES = frozenset({403})
 # Зеркало считается упавшим только после N неудачных проверок подряд
 _FAILS_BEFORE_DOWN = 2
 _HEADERS = {
@@ -61,9 +64,6 @@ async def switch_scheduled_links(
        ещё не применялось (schedule_applied=False).
     2. Деактивируем ссылки, у которых истекло active_to.
     3. Уведомляем админов — только после успешного commit.
-
-    FIX: раньше выборка шла по is_active=False — после включения лучшей ссылки
-    на следующем запуске включалась следующая, и зеркала крутились по кругу.
     """
     notifications: list[str] = []
 
@@ -74,8 +74,8 @@ async def switch_scheduled_links(
             to_activate = list((await session.scalars(
                 select(Link).where(
                     Link.active_from <= now,
-                    Link.schedule_applied == False,
-                    Link.is_deleted == False,
+                    Link.schedule_applied == False,  # noqa: E712
+                    Link.is_deleted == False,  # noqa: E712
                     (Link.active_to > now) | (Link.active_to.is_(None)),
                 )
             )).all())
@@ -83,8 +83,8 @@ async def switch_scheduled_links(
             to_deactivate = list((await session.scalars(
                 select(Link).where(
                     Link.active_to <= now,
-                    Link.is_active == True,
-                    Link.is_deleted == False,
+                    Link.is_active == True,  # noqa: E712
+                    Link.is_deleted == False,  # noqa: E712
                 )
             )).all())
 
@@ -99,7 +99,7 @@ async def switch_scheduled_links(
                 best = max(to_activate, key=lambda l: l.priority)
                 await session.execute(
                     update(Link)
-                    .where(Link.is_deleted == False, Link.id != best.id)
+                    .where(Link.is_deleted == False, Link.id != best.id)  # noqa: E712
                     .values(is_active=False)
                 )
                 best.is_active = True
@@ -110,12 +110,12 @@ async def switch_scheduled_links(
 
                 notifications.append(
                     f"🔄 <b>Автопереключение зеркала</b>\n\n"
-                    f"Активировано: <b>{best.title}</b>\n"
-                    f"URL: <code>{best.url}</code>"
+                    f"Активировано: <b>{html.escape(best.title)}</b>\n"
+                    f"URL: <code>{html.escape(best.url)}</code>"
                 )
 
             if to_deactivate:
-                titles = ", ".join(l.title for l in to_deactivate)
+                titles = ", ".join(html.escape(l.title) for l in to_deactivate)
                 notifications.append(f"⏳ <b>Срок зеркал истёк</b>\n\nДеактивированы: {titles}")
 
             await session.commit()
@@ -126,7 +126,7 @@ async def switch_scheduled_links(
             return
 
     for text in notifications:
-        await _notify_admins(bot, text)
+        await notify_admins(bot, text)
 
 
 # ────────────────────────────────────────────────────────
@@ -142,63 +142,132 @@ async def health_check_links(
 
     Пингует каждое не удалённое зеркало.
     Если статус is_healthy изменился — обновляет БД и уведомляет админов.
+    FIX (#11): если все активные зеркала упали — включает следующее
+    рабочее по приоритету (AUTO_SWITCH_ON_DOWN).
     """
+    notifications: list[str] = []
+
     async with session_factory() as session:
         try:
-            result = await session.execute(
-                select(Link).where(Link.is_deleted == False)
-            )
-            links = list(result.scalars().all())
+            links = list((await session.scalars(
+                select(Link).where(Link.is_deleted == False)  # noqa: E712
+            )).all())
 
             if not links:
                 return
 
             results = await _ping_all(links)
 
-            changed: list[tuple[Link, bool]] = []
-            for link, raw_ok in results:
-                is_healthy = await _with_fail_threshold(link, raw_ok)
+            changed: list[tuple[Link, bool, str]] = []
+            for link, check in zip(links, results):
+                is_healthy = await _with_fail_threshold(link, check.ok)
                 if link.is_healthy != is_healthy:
-                    changed.append((link, is_healthy))
+                    changed.append((link, is_healthy, check.reason))
                     link.is_healthy = is_healthy
 
-            if changed:
-                await session.commit()
-                await _notify_health_changes(bot, changed)
-            else:
+            switch_text = None
+            if settings.AUTO_SWITCH_ON_DOWN and needs_switch(links):
+                switch_text = await _switch_to_replacement(session, links)
+
+            if not changed and switch_text is None:
                 await session.rollback()
+                return
+
+            await session.commit()
+            if changed:
+                notifications.append(_health_changes_text(changed))
+            if switch_text:
+                notifications.append(switch_text)
 
         except Exception:
             logger.exception("scheduler: health_check_links failed")
             await session.rollback()
+            return
+
+    for text in notifications:
+        await notify_admins(bot, text)
 
 
-async def _ping_all(links: list[Link]) -> list[tuple[Link, bool]]:
-    """Пингуем все ссылки параллельно."""
+async def _switch_to_replacement(session: AsyncSession, links: list[Link]) -> str | None:
+    """Выключает упавшие активные зеркала и включает лучшее рабочее."""
+    down = [l for l in links if l.is_active and not l.is_deleted]
+    replacement = pick_replacement(links)
+
+    if replacement is None:
+        logger.warning("scheduler: all mirrors are down, nothing to switch to")
+        # Не спамим каждые 10 минут — одно предупреждение в час
+        redis = await get_redis()
+        if not await redis.set("health:all_down_alert", "1", ex=3600, nx=True):
+            return None
+        return (
+            "🚨 <b>Все зеркала недоступны</b>\n\n"
+            "Активное зеркало упало, а рабочих замен нет. "
+            "Добавьте новое зеркало в админке."
+        )
+
+    await LinkRepository(session).activate(replacement.id, admin_id=None)
+    for link in links:
+        link.is_active = link.id == replacement.id
+
+    session.add(ActionLog(
+        action=ActionType.LINK_SWITCHED,
+        meta={
+            "action": "auto_switch",
+            "reason": "health",
+            "from": [l.id for l in down],
+            "to": replacement.id,
+        },
+    ))
+    logger.info(
+        "scheduler: auto-switched from %s to link_id=%s",
+        [l.id for l in down], replacement.id,
+    )
+    down_titles = ", ".join(html.escape(l.title) for l in down)
+    return (
+        f"🔄 <b>Автопереключение зеркала</b>\n\n"
+        f"Упало: {down_titles}\n"
+        f"Включено: <b>{html.escape(replacement.title)}</b>\n"
+        f"URL: <code>{html.escape(replacement.url)}</code>"
+    )
+
+
+@dataclass(frozen=True)
+class PingResult:
+    ok: bool
+    reason: str = ""
+
+
+async def _ping_all(links: list[Link]) -> list[PingResult]:
+    """Пингуем все ссылки параллельно. Порядок результатов = порядок links."""
     async with aiohttp.ClientSession(timeout=_PING_TIMEOUT) as http:
-        tasks = [_ping_one(http, link) for link in links]
-        return await asyncio.gather(*tasks)
+        return list(await asyncio.gather(*(_ping_one(http, link.url) for link in links)))
 
 
-def _status_ok(code: int) -> bool:
-    return 200 <= code < 400 or code in _EXTRA_OK_CODES
-
-
-async def _ping_one(http: aiohttp.ClientSession, link: Link) -> tuple[Link, bool]:
+async def _ping_one(http: aiohttp.ClientSession, url: str) -> PingResult:
+    """
+    FIX (#12): кроме кода ответа проверяем, что после редиректов мы
+    остались на своём домене. Заглушки провайдеров о блокировке
+    часто отвечают 200, но с другого домена.
+    """
     try:
         async with http.get(
-            link.url,
+            url,
             allow_redirects=True,
             headers=_HEADERS,
             # Прокси в нужной стране — проверка «глазами» пользователя
             proxy=settings.HEALTHCHECK_PROXY or None,
         ) as resp:
-            healthy = _status_ok(resp.status)
-            logger.debug("ping link_id=%s status=%s healthy=%s", link.id, resp.status, healthy)
-            return link, healthy
+            final_url = str(resp.url)
+            if not same_site(url, final_url):
+                return PingResult(False, f"редирект на {site_host(final_url) or final_url}")
+            if not status_ok(resp.status, allow_403=settings.HEALTHCHECK_OK_403):
+                return PingResult(False, f"код {resp.status}")
+            return PingResult(True)
+    except asyncio.TimeoutError:
+        return PingResult(False, "таймаут")
     except Exception as e:
-        logger.debug("ping link_id=%s error=%s", link.id, e)
-        return link, False
+        logger.debug("ping url=%s error=%s", url, e)
+        return PingResult(False, type(e).__name__)
 
 
 async def _with_fail_threshold(link: Link, ok: bool) -> bool:
@@ -214,25 +283,27 @@ async def _with_fail_threshold(link: Link, ok: bool) -> bool:
     return link.is_healthy if fails < _FAILS_BEFORE_DOWN else False
 
 
-async def _notify_health_changes(
-    bot: Bot,
-    changed: list[tuple[Link, bool]],
-) -> None:
-    went_down = [l for l, h in changed if not h]
-    came_up   = [l for l, h in changed if h]
-
+def _health_changes_text(changed: list[tuple[Link, bool, str]]) -> str:
     parts: list[str] = []
 
+    went_down = [(l, r) for l, h, r in changed if not h]
+    came_up = [l for l, h, _ in changed if h]
+
     if went_down:
-        titles = "\n".join(f"  • {l.title} — <code>{l.url}</code>" for l in went_down)
-        parts.append(f"❌ <b>Зеркала упали:</b>\n{titles}")
+        lines = "\n".join(
+            f"  • {html.escape(l.title)} — <code>{html.escape(l.url)}</code>"
+            + (f" ({html.escape(r)})" if r else "")
+            for l, r in went_down
+        )
+        parts.append(f"❌ <b>Зеркала упали:</b>\n{lines}")
 
     if came_up:
-        titles = "\n".join(f"  • {l.title} — <code>{l.url}</code>" for l in came_up)
-        parts.append(f"✅ <b>Зеркала восстановились:</b>\n{titles}")
+        lines = "\n".join(
+            f"  • {html.escape(l.title)} — <code>{html.escape(l.url)}</code>" for l in came_up
+        )
+        parts.append(f"✅ <b>Зеркала восстановились:</b>\n{lines}")
 
-    if parts:
-        await _notify_admins(bot, "\n\n".join(parts))
+    return "\n\n".join(parts)
 
 
 # ────────────────────────────────────────────────────────
@@ -265,7 +336,7 @@ async def daily_stats(
                 )
             ) or 0
 
-            await _notify_admins(
+            await notify_admins(
                 bot,
                 f"📊 <b>Статистика за {yesterday:%d.%m.%Y}</b>\n\n"
                 f"👥 Новых пользователей: <b>{new_users}</b>\n"
@@ -330,14 +401,5 @@ async def run_pending_broadcasts(
             await session.rollback()
 
 
-# ────────────────────────────────────────────────────────
-# Helpers
-# ────────────────────────────────────────────────────────
-
-async def _notify_admins(bot: Bot, text: str) -> None:
-    """Рассылает уведомление всем ADMIN_IDS. Ошибки не бросает."""
-    for admin_id in settings.ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, text, parse_mode="HTML")
-        except Exception as e:
-            logger.warning("cannot notify admin=%s: %s", admin_id, e)
+# Совместимость: раньше функция жила здесь и импортировалась из других модулей
+_notify_admins = notify_admins
